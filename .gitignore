@@ -1,5 +1,6 @@
 # Secrets — never commit
 .streamlit/secrets.toml
+config/google_ads.yaml
 
 # Python
 __pycache__/

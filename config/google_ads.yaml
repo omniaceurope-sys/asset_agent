@@ -1,5 +1,0 @@
-developer_token: "XXXXXXXXXXXXXXXX"
-client_id: "XXXXXXXX.apps.googleusercontent.com"
-client_secret: "XXXXXXXX"
-refresh_token: "1//XXXXXXXX"
-login_customer_id: "XXXXXXXXXX"   # MCC account ID, digits only — no dashes
