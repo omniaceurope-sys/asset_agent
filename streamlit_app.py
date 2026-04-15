@@ -415,6 +415,69 @@ def render_assets():
     _render_snippets_editor()
 
 
+# ---------------------------------------------------------------------------
+# Sync helpers — write current widget values back into session_state lists
+# before any structural change (delete / add), so edits are not lost.
+# ---------------------------------------------------------------------------
+
+def _sync_sitelinks():
+    sitelinks = st.session_state.get("sitelinks", [])
+    updated = []
+    for i in range(len(sitelinks)):
+        updated.append({
+            "title": st.session_state.get(f"sl_{i}_title", "").strip(),
+            "description1": st.session_state.get(f"sl_{i}_d1", "").strip(),
+            "description2": st.session_state.get(f"sl_{i}_d2", "").strip(),
+            "final_url": st.session_state.get(f"sl_{i}_url", "").strip(),
+        })
+    st.session_state["sitelinks"] = updated
+
+
+def _sync_callouts():
+    callouts = st.session_state.get("callouts", [])
+    st.session_state["callouts"] = [
+        st.session_state.get(f"co_{i}", "").strip()
+        for i in range(len(callouts))
+    ]
+
+
+def _sync_snippets():
+    snippets = st.session_state.get("snippets", [])
+    updated = []
+    for i, sn in enumerate(snippets):
+        n_vals = len(sn.get("values", []))
+        updated.append({
+            "header": st.session_state.get(f"sn_{i}_header", "").strip(),
+            "values": [
+                st.session_state.get(f"sn_{i}_val_{j}", "").strip()
+                for j in range(n_vals)
+            ],
+        })
+    st.session_state["snippets"] = updated
+
+
+def _clear_sl_keys():
+    for k in list(st.session_state.keys()):
+        if k.startswith("sl_"):
+            del st.session_state[k]
+
+
+def _clear_co_keys():
+    for k in list(st.session_state.keys()):
+        if k.startswith("co_"):
+            del st.session_state[k]
+
+
+def _clear_sn_keys():
+    for k in list(st.session_state.keys()):
+        if k.startswith("sn_"):
+            del st.session_state[k]
+
+
+# ---------------------------------------------------------------------------
+# Asset editors
+# ---------------------------------------------------------------------------
+
 def _render_sitelinks_editor():
     sitelinks = st.session_state["sitelinks"]
     st.markdown(f"### Sitelinks ({len(sitelinks)})")
@@ -435,7 +498,7 @@ def _render_sitelinks_editor():
         label = f"Sitelink {i + 1} — {title_val}" if title_val else f"Sitelink {i + 1}"
 
         with st.expander(label, expanded=(i == 0)):
-            col1, col2, col3 = st.columns(3)
+            col1, col2, col3, del_col = st.columns([3, 3, 3, 1])
 
             with col1:
                 st.text_input("Title", max_chars=SITELINK_TITLE_LIMIT, key=title_key)
@@ -449,7 +512,23 @@ def _render_sitelinks_editor():
                 st.text_input("Description line 2", max_chars=SITELINK_DESC_LIMIT, key=d2_key)
                 st.caption(_char_label(st.session_state[d2_key], SITELINK_DESC_LIMIT))
 
+            with del_col:
+                st.markdown("&nbsp;", unsafe_allow_html=True)
+                if st.button("🗑️", key=f"sl_del_{i}", help="Delete this sitelink"):
+                    _sync_sitelinks()
+                    st.session_state["sitelinks"].pop(i)
+                    _clear_sl_keys()
+                    st.rerun()
+
             st.text_input("Final URL", key=url_key)
+
+    if st.button("➕ Add Sitelink", key="sl_add"):
+        _sync_sitelinks()
+        st.session_state["sitelinks"].append(
+            {"title": "", "description1": "", "description2": "", "final_url": ""}
+        )
+        _clear_sl_keys()
+        st.rerun()
 
 
 def _render_callouts_editor():
@@ -462,8 +541,23 @@ def _render_callouts_editor():
         if key not in st.session_state:
             st.session_state[key] = text
         with cols[i % 3]:
-            st.text_input(f"Callout {i + 1}", max_chars=CALLOUT_LIMIT, key=key)
-            st.caption(_char_label(st.session_state[key], CALLOUT_LIMIT))
+            inp_col, del_col = st.columns([5, 1])
+            with inp_col:
+                st.text_input(f"Callout {i + 1}", max_chars=CALLOUT_LIMIT, key=key)
+                st.caption(_char_label(st.session_state[key], CALLOUT_LIMIT))
+            with del_col:
+                st.markdown("&nbsp;", unsafe_allow_html=True)
+                if st.button("🗑️", key=f"co_del_{i}", help="Delete this callout"):
+                    _sync_callouts()
+                    st.session_state["callouts"].pop(i)
+                    _clear_co_keys()
+                    st.rerun()
+
+    if st.button("➕ Add Callout", key="co_add"):
+        _sync_callouts()
+        st.session_state["callouts"].append("")
+        _clear_co_keys()
+        st.rerun()
 
 
 def _render_snippets_editor():
@@ -477,10 +571,19 @@ def _render_snippets_editor():
 
         header = st.session_state[header_key]
         with st.expander(f"Snippet {i + 1} — {header}", expanded=True):
-            st.text_input("Header", key=header_key)
+            hdr_col, del_col = st.columns([5, 1])
+            with hdr_col:
+                st.text_input("Header", key=header_key)
+            with del_col:
+                st.markdown("&nbsp;", unsafe_allow_html=True)
+                if st.button("🗑️", key=f"sn_del_{i}", help="Delete this snippet"):
+                    _sync_snippets()
+                    st.session_state["snippets"].pop(i)
+                    _clear_sn_keys()
+                    st.rerun()
 
             values = snippet.get("values", [])
-            val_cols = st.columns(min(len(values), 5))
+            val_cols = st.columns(min(max(len(values), 1), 5))
             for j, val in enumerate(values):
                 val_key = f"sn_{i}_val_{j}"
                 if val_key not in st.session_state:
@@ -488,6 +591,12 @@ def _render_snippets_editor():
                 with val_cols[j % 5]:
                     st.text_input(f"Value {j + 1}", max_chars=SNIPPET_VAL_LIMIT, key=val_key)
                     st.caption(_char_label(st.session_state[val_key], SNIPPET_VAL_LIMIT))
+
+    if st.button("➕ Add Snippet", key="sn_add"):
+        _sync_snippets()
+        st.session_state["snippets"].append({"header": "Types", "values": [""]})
+        _clear_sn_keys()
+        st.rerun()
 
 
 def _collect_edited_assets() -> dict:

@@ -90,12 +90,18 @@ WRITING RULES:
    Maximum one exclamation mark allowed in sitelink descriptions.
 5. Title Case for sitelink titles and callout texts.
 6. Each callout must communicate a different benefit — no redundancy.
-7. Do NOT create sitelinks for: the homepage, individual blog posts,
-   privacy policy, terms of service, cookie policy, login, or account pages.
-8. Only use structured snippet headers that genuinely fit the business.
+7. Do NOT create sitelinks for: the homepage, blog posts, privacy policy,
+   terms of service, cookie policy, login, account pages, contact pages,
+   support pages, FAQ pages, customer service pages, or any non-product destination.
+   ALL sitelinks must link to product pages, category pages, or collection pages only.
+8. ALL sitelink descriptions must be strictly product-focused: describe what the
+   product is, its key features, materials, or why a shopper would want it.
+   Do NOT write descriptions about shipping, returns, company values, contact info,
+   customer service, guarantees, or any non-product topic.
+9. Only use structured snippet headers that genuinely fit the business.
    Do not force a header that does not apply.
-9. Provide 3–10 values per structured snippet.
-10. Provide 8–12 sitelinks, 8–12 callouts, and 3–5 structured snippets.
+10. Provide 3–10 values per structured snippet.
+11. Provide 8–12 sitelinks, 8–12 callouts, and 3–5 structured snippets.
 
 OUTPUT FORMAT:
 Respond ONLY with valid JSON. No markdown fences, no explanation, no preamble.
