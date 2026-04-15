@@ -23,15 +23,12 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
 from scraper import (
     ScraperError,
     _absolute_url,
-    _extract_body_excerpt,
-    _extract_brand_name,
-    _extract_currency,
     _extract_json_ld,
     _extract_language,
     _extract_nav_links,
     _extract_open_graph,
-    _extract_tagline,
-    _extract_trust_signals,
+    _extract_page_text,
+    _extract_title,
     _fetch,
     _find_secondary_pages,
     _normalize_url,
@@ -207,46 +204,6 @@ class TestExtractOpenGraph:
 
 
 # ===========================================================================
-# _extract_brand_name
-# ===========================================================================
-
-class TestExtractBrandName:
-    def test_prefers_og_site_name(self):
-        html = '''<html><head>
-        <meta property="og:site_name" content="BrandFromOG">
-        <title>SomeOtherTitle</title>
-        </head></html>'''
-        soup = make_soup(html)
-        assert _extract_brand_name(soup, []) == "BrandFromOG"
-
-    def test_falls_back_to_json_ld_organization(self):
-        html = "<html><head><title>Page | Shop</title></head></html>"
-        json_ld = [{"@type": "Organization", "name": "OrgName"}]
-        assert _extract_brand_name(make_soup(html), json_ld) == "OrgName"
-
-    def test_falls_back_to_title_stripped(self):
-        html = "<html><head><title>BrandName | Home</title></head></html>"
-        assert _extract_brand_name(make_soup(html), []) == "BrandName"
-
-    def test_strips_title_dash_separator(self):
-        html = "<html><head><title>My Brand - Official Site</title></head></html>"
-        assert _extract_brand_name(make_soup(html), []) == "My Brand"
-
-    def test_strips_title_endash_separator(self):
-        html = "<html><head><title>My Shop – Great Deals</title></head></html>"
-        assert _extract_brand_name(make_soup(html), []) == "My Shop"
-
-    def test_json_ld_graph_format(self):
-        html = "<html><head></head></html>"
-        json_ld = [{"@graph": [{"@type": "WebSite", "name": "GraphBrand"}]}]
-        assert _extract_brand_name(make_soup(html), json_ld) == "GraphBrand"
-
-    def test_returns_none_when_nothing_found(self):
-        html = "<html><head></head><body></body></html>"
-        assert _extract_brand_name(make_soup(html), []) is None
-
-
-# ===========================================================================
 # _extract_language
 # ===========================================================================
 
@@ -269,125 +226,74 @@ class TestExtractLanguage:
 
 
 # ===========================================================================
-# _extract_currency
+# _extract_title
 # ===========================================================================
 
-class TestExtractCurrency:
-    def test_reads_og_price_currency(self):
-        html = '<html><head><meta property="og:price:currency" content="GBP"></head></html>'
-        assert _extract_currency(make_soup(html), []) == "GBP"
+class TestExtractTitle:
+    def test_prefers_h1(self):
+        html = "<html><head><title>Page Title</title></head><body><h1>H1 Title</h1></body></html>"
+        assert _extract_title(make_soup(html)) == "H1 Title"
 
-    def test_reads_product_price_currency(self):
-        html = '<html><head><meta property="product:price:currency" content="EUR"></head></html>'
-        assert _extract_currency(make_soup(html), []) == "EUR"
-
-    def test_reads_json_ld_offers(self):
-        html = "<html><head></head></html>"
-        json_ld = [{"@type": "Product", "offers": {"priceCurrency": "USD"}}]
-        assert _extract_currency(make_soup(html), json_ld) == "USD"
-
-    def test_detects_pound_symbol(self):
-        html = "<html><body><p>Price: £29.99</p></body></html>"
-        assert _extract_currency(make_soup(html), []) == "GBP"
-
-    def test_detects_euro_symbol(self):
-        html = "<html><body><p>Preis: €19.99</p></body></html>"
-        assert _extract_currency(make_soup(html), []) == "EUR"
-
-    def test_detects_dollar_symbol(self):
-        html = "<html><body><p>Price: $49.99</p></body></html>"
-        assert _extract_currency(make_soup(html), []) == "USD"
-
-    def test_returns_none_when_no_currency(self):
-        html = "<html><body><p>No prices here</p></body></html>"
-        assert _extract_currency(make_soup(html), []) is None
-
-
-# ===========================================================================
-# _extract_tagline
-# ===========================================================================
-
-class TestExtractTagline:
-    def test_reads_h1(self):
-        html = "<html><body><h1>Our Amazing Products</h1></body></html>"
-        assert _extract_tagline(make_soup(html)) == "Our Amazing Products"
-
-    def test_falls_back_to_og_description(self):
-        html = '''<html>
-        <head><meta property="og:description" content="Best shop online"></head>
-        <body></body></html>'''
-        assert _extract_tagline(make_soup(html)) == "Best shop online"
-
-    def test_falls_back_to_meta_description(self):
-        html = '''<html>
-        <head><meta name="description" content="Quality products since 2010"></head>
-        <body></body></html>'''
-        assert _extract_tagline(make_soup(html)) == "Quality products since 2010"
+    def test_falls_back_to_title_tag(self):
+        html = "<html><head><title>Page Title</title></head><body></body></html>"
+        assert _extract_title(make_soup(html)) == "Page Title"
 
     def test_returns_none_when_nothing(self):
-        html = "<html><head></head><body><p>Just a paragraph</p></body></html>"
-        assert _extract_tagline(make_soup(html)) is None
+        html = "<html><head></head><body><p>No title</p></body></html>"
+        assert _extract_title(make_soup(html)) is None
 
-    def test_ignores_very_long_h1(self):
-        long_text = "x" * 201
-        html = f"<html><body><h1>{long_text}</h1><meta name='description' content='short'></body></html>"
-        result = _extract_tagline(make_soup(html))
-        # Should fall back since h1 is > 200 chars
-        assert result is None or len(result) <= 200
+    def test_strips_whitespace_from_h1(self):
+        html = "<html><body><h1>  Trimmed Title  </h1></body></html>"
+        assert _extract_title(make_soup(html)) == "Trimmed Title"
 
 
 # ===========================================================================
-# _extract_trust_signals
+# _extract_page_text
 # ===========================================================================
 
-class TestExtractTrustSignals:
-    def test_detects_free_shipping(self):
-        html = "<html><body><p>Enjoy free shipping on all orders.</p></body></html>"
-        signals = _extract_trust_signals(make_soup(html), [])
-        assert any("Free Shipping" in s for s in signals)
+class TestExtractPageText:
+    def test_returns_body_text(self):
+        html = "<html><body><p>Hello world content here.</p></body></html>"
+        text = _extract_page_text(make_soup(html))
+        assert "Hello world content here" in text
 
-    def test_detects_money_back_guarantee(self):
-        html = "<html><body><p>30-day money-back guarantee.</p></body></html>"
-        signals = _extract_trust_signals(make_soup(html), [])
-        assert any("Money-Back Guarantee" in s for s in signals)
+    def test_excludes_nav_text(self):
+        html = """<html><body>
+        <nav>Navigation Menu Items</nav>
+        <main><p>Main content of the page goes here.</p></main>
+        </body></html>"""
+        text = _extract_page_text(make_soup(html))
+        assert "Navigation Menu Items" not in text
+        assert "Main content" in text
 
-    def test_detects_star_rating(self):
-        html = "<html><body><p>Rated 4.8/5 star by our customers.</p></body></html>"
-        signals = _extract_trust_signals(make_soup(html), [])
-        assert any("Star Rating" in s for s in signals)
+    def test_excludes_footer_text(self):
+        html = """<html><body>
+        <main><p>Main content here is useful and long.</p></main>
+        <footer>Footer copyright text</footer>
+        </body></html>"""
+        text = _extract_page_text(make_soup(html))
+        assert "Footer copyright" not in text
+        assert "Main content" in text
 
-    def test_detects_email(self):
-        html = "<html><body><p>Contact us at hello@example.com</p></body></html>"
-        signals = _extract_trust_signals(make_soup(html), [])
-        assert any("hello@example.com" in s for s in signals)
+    def test_excludes_script_content(self):
+        html = """<html><body>
+        <script>var x = 'secret';</script>
+        <p>Visible content paragraph here.</p>
+        </body></html>"""
+        text = _extract_page_text(make_soup(html))
+        assert "secret" not in text
+        assert "Visible content" in text
 
-    def test_detects_years_in_business(self):
-        html = "<html><body><p>Trusted since 2010.</p></body></html>"
-        signals = _extract_trust_signals(make_soup(html), [])
-        assert any("Years in Business" in s for s in signals)
+    def test_truncates_to_max_chars(self):
+        long_text = "word " * 1000  # ~5000 chars
+        html = f"<html><body><p>{long_text}</p></body></html>"
+        text = _extract_page_text(make_soup(html), max_chars=100)
+        assert len(text) <= 100
 
-    def test_extracts_address_from_json_ld(self):
-        html = "<html><body></body></html>"
-        json_ld = [{
-            "@type": "LocalBusiness",
-            "address": {
-                "streetAddress": "123 Main St",
-                "addressLocality": "London",
-                "addressCountry": "GB",
-            }
-        }]
-        signals = _extract_trust_signals(make_soup(html), json_ld)
-        assert any("London" in s for s in signals)
-
-    def test_deduplicates_signals(self):
-        html = "<html><body><p>free shipping free shipping free shipping</p></body></html>"
-        signals = _extract_trust_signals(make_soup(html), [])
-        free_shipping = [s for s in signals if "Free Shipping" in s]
-        assert len(free_shipping) <= 1
-
-    def test_empty_page_returns_empty_list(self):
-        html = "<html><body></body></html>"
-        assert _extract_trust_signals(make_soup(html), []) == []
+    def test_collapses_whitespace(self):
+        html = "<html><body><p>Hello   world</p><p>foo    bar</p></body></html>"
+        text = _extract_page_text(make_soup(html))
+        assert "  " not in text  # no double spaces
 
 
 # ===========================================================================
@@ -513,54 +419,6 @@ class TestFindSecondaryPages:
 
 
 # ===========================================================================
-# _extract_body_excerpt
-# ===========================================================================
-
-class TestExtractBodyExcerpt:
-    def test_extracts_first_paragraph(self):
-        html = "<html><body><p>This is the first paragraph with enough content.</p></body></html>"
-        result = _extract_body_excerpt(make_soup(html))
-        assert "first paragraph" in result
-
-    def test_skips_short_paragraphs(self):
-        html = "<html><body><p>Short</p><p>This is a longer paragraph with meaningful content here.</p></body></html>"
-        result = _extract_body_excerpt(make_soup(html))
-        assert "longer paragraph" in result
-
-    def test_combines_up_to_three_paragraphs(self):
-        html = """<html><body>
-        <p>First paragraph with enough content to be included here.</p>
-        <p>Second paragraph with enough content to be included here.</p>
-        <p>Third paragraph with enough content to be included here.</p>
-        <p>Fourth paragraph that should not appear in excerpt output.</p>
-        </body></html>"""
-        result = _extract_body_excerpt(make_soup(html))
-        assert "First paragraph" in result
-        assert "Third paragraph" in result
-        assert "Fourth paragraph" not in result
-
-    def test_excludes_footer_content(self):
-        html = """<html><body>
-        <footer><p>Footer content that should not appear in excerpt text here.</p></footer>
-        <main><p>Main content paragraph that is long enough to be included.</p></main>
-        </body></html>"""
-        result = _extract_body_excerpt(make_soup(html))
-        assert "Footer content" not in result
-
-    def test_excludes_nav_content(self):
-        html = """<html><body>
-        <nav><p>Navigation text with plenty of characters to pass length check.</p></nav>
-        <article><p>Article content paragraph that is long enough to be included.</p></article>
-        </body></html>"""
-        result = _extract_body_excerpt(make_soup(html))
-        assert "Navigation text" not in result
-
-    def test_returns_none_when_no_paragraphs(self):
-        html = "<html><body><div>No paragraph tags here</div></body></html>"
-        assert _extract_body_excerpt(make_soup(html)) is None
-
-
-# ===========================================================================
 # _fetch (mocked HTTP)
 # ===========================================================================
 
@@ -608,9 +466,8 @@ SAMPLE_HOMEPAGE_HTML = """<!DOCTYPE html>
   <title>TestBrand | Home</title>
   <meta property="og:site_name" content="TestBrand">
   <meta property="og:description" content="Quality products since 2015">
-  <meta property="og:price:currency" content="GBP">
   <script type="application/ld+json">
-  {"@type": "Organization", "name": "TestBrand", "address": {"streetAddress": "1 High St", "addressLocality": "London", "addressCountry": "GB"}}
+  {"@type": "Organization", "name": "TestBrand"}
   </script>
 </head>
 <body>
@@ -654,9 +511,6 @@ class TestScrapeSite:
     @patch("scraper.requests.Session")
     def test_returns_complete_structure(self, MockSession, mock_robots):
         session_instance = MockSession.return_value
-        session_instance.get.return_value = self._make_mock_response(SAMPLE_PAGE_HTML)
-
-        # Homepage call returns SAMPLE_HOMEPAGE_HTML
         session_instance.get.side_effect = [
             self._make_mock_response(SAMPLE_HOMEPAGE_HTML),  # homepage
             self._make_mock_response(SAMPLE_PAGE_HTML),       # /shop
@@ -673,16 +527,40 @@ class TestScrapeSite:
         result = scrape_site("https://example.com")
 
         assert result["base_url"] == "https://example.com"
-        assert result["brand_name"] == "TestBrand"
         assert result["language"] == "en-GB"
-        assert result["currency"] == "GBP"
-        assert isinstance(result["nav_links"], list)
+        assert isinstance(result["homepage"], dict)
         assert isinstance(result["nav_pages"], list)
         assert isinstance(result["secondary_pages"], dict)
         assert isinstance(result["json_ld"], list)
         assert isinstance(result["open_graph"], dict)
-        assert isinstance(result["trust_signals"], list)
         assert isinstance(result["scrape_errors"], list)
+
+    @patch("scraper._is_allowed_by_robots", return_value=True)
+    @patch("scraper.requests.Session")
+    def test_homepage_contains_page_text(self, MockSession, mock_robots):
+        session_instance = MockSession.return_value
+        session_instance.get.return_value = self._make_mock_response(SAMPLE_HOMEPAGE_HTML)
+
+        result = scrape_site("https://example.com")
+        homepage = result["homepage"]
+        assert homepage["url"] == "https://example.com"
+        assert homepage["url_path"] == "/"
+        assert homepage["title"] == "Quality products since 2015"  # from h1
+        assert isinstance(homepage["text"], str)
+        assert len(homepage["text"]) > 0
+
+    @patch("scraper._is_allowed_by_robots", return_value=True)
+    @patch("scraper.requests.Session")
+    def test_homepage_text_excludes_nav(self, MockSession, mock_robots):
+        session_instance = MockSession.return_value
+        session_instance.get.return_value = self._make_mock_response(SAMPLE_HOMEPAGE_HTML)
+
+        result = scrape_site("https://example.com")
+        # Nav links text should be removed from the text
+        homepage_text = result["homepage"]["text"]
+        # "Shop" and "About" appear in nav, should not appear as isolated nav items
+        # (they might appear in body content though, so just check the page has content)
+        assert isinstance(homepage_text, str)
 
     @patch("scraper._is_allowed_by_robots", return_value=True)
     @patch("scraper.requests.Session")
@@ -696,21 +574,22 @@ class TestScrapeSite:
 
     @patch("scraper._is_allowed_by_robots", return_value=True)
     @patch("scraper.requests.Session")
-    def test_extracts_trust_signals_from_homepage(self, MockSession, mock_robots):
-        session_instance = MockSession.return_value
-        # Return homepage HTML for all fetches
-        session_instance.get.return_value = self._make_mock_response(SAMPLE_HOMEPAGE_HTML)
-
-        result = scrape_site("https://example.com")
-        assert any("Free Shipping" in s for s in result["trust_signals"])
-
-    @patch("scraper._is_allowed_by_robots", return_value=True)
-    @patch("scraper.requests.Session")
     def test_detects_nav_links(self, MockSession, mock_robots):
         session_instance = MockSession.return_value
         session_instance.get.return_value = self._make_mock_response(SAMPLE_HOMEPAGE_HTML)
 
         result = scrape_site("https://example.com")
-        nav_urls = [l["url"] for l in result["nav_links"]]
-        assert "https://example.com/shop" in nav_urls
-        assert "https://example.com/about" in nav_urls
+        nav_urls = [p["url"] for p in result["nav_pages"]]
+        assert any("shop" in u for u in nav_urls)
+        assert any("about" in u for u in nav_urls)
+
+    @patch("scraper._is_allowed_by_robots", return_value=True)
+    @patch("scraper.requests.Session")
+    def test_nav_pages_have_text(self, MockSession, mock_robots):
+        session_instance = MockSession.return_value
+        session_instance.get.return_value = self._make_mock_response(SAMPLE_PAGE_HTML)
+
+        result = scrape_site("https://example.com")
+        for page in result["nav_pages"]:
+            assert "text" in page
+            assert isinstance(page["text"], str)

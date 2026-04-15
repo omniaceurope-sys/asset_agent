@@ -278,20 +278,22 @@ class TestValidateAssets:
 # ===========================================================================
 
 class TestBuildUserPrompt:
+    # Scraped data now contains raw page text (no pre-extracted fields)
     SCRAPED = {
         "base_url": "https://example.com",
-        "brand_name": "TestBrand",
         "language": "en-GB",
-        "currency": "GBP",
-        "tagline": "Quality since 2015",
-        "trust_signals": ["Free Shipping", "30-Day Returns"],
+        "homepage": {
+            "url": "https://example.com",
+            "url_path": "/",
+            "title": "TestBrand | Home",
+            "text": "Free shipping on orders over £50. 30-day returns. Quality since 2015.",
+        },
         "nav_pages": [
             {
                 "url": "https://example.com/shop",
                 "url_path": "/shop",
                 "title": "Shop",
-                "meta_description": "Browse all products",
-                "body_excerpt": "Find what you need.",
+                "text": "Browse all our products. Find what you need.",
             }
         ],
         "secondary_pages": {
@@ -299,17 +301,12 @@ class TestBuildUserPrompt:
                 "url": "https://example.com/about",
                 "url_path": "/about",
                 "title": "About Us",
-                "meta_description": None,
-                "body_excerpt": "We love quality.",
+                "text": "We have been making quality products since 2015.",
             }
         },
         "json_ld": [{"@type": "Organization", "name": "TestBrand"}],
         "open_graph": {"site_name": "TestBrand"},
     }
-
-    def test_includes_brand_name(self):
-        prompt = build_user_prompt(self.SCRAPED, "TestBrand - UK")
-        assert "TestBrand" in prompt
 
     def test_includes_base_url(self):
         prompt = build_user_prompt(self.SCRAPED, "TestBrand - UK")
@@ -319,55 +316,62 @@ class TestBuildUserPrompt:
         prompt = build_user_prompt(self.SCRAPED, "TestBrand - UK")
         assert "en-GB" in prompt
 
-    def test_includes_trust_signals(self):
+    def test_includes_homepage_text(self):
         prompt = build_user_prompt(self.SCRAPED, "TestBrand - UK")
-        assert "Free Shipping" in prompt
-        assert "30-Day Returns" in prompt
+        assert "Free shipping on orders over" in prompt
 
-    def test_includes_nav_page(self):
+    def test_includes_nav_page_text(self):
         prompt = build_user_prompt(self.SCRAPED, "TestBrand - UK")
         assert "/shop" in prompt
+        assert "Browse all our products" in prompt
 
-    def test_includes_secondary_page(self):
+    def test_includes_secondary_page_text(self):
         prompt = build_user_prompt(self.SCRAPED, "TestBrand - UK")
         assert "About Us" in prompt
+        assert "quality products since 2015" in prompt
 
     def test_includes_account_name(self):
         prompt = build_user_prompt(self.SCRAPED, "Brand A - UK")
         assert "Brand A - UK" in prompt
 
-    def test_truncates_body_excerpt_to_300_chars(self):
+    def test_includes_json_ld_summary(self):
+        prompt = build_user_prompt(self.SCRAPED, "TestBrand - UK")
+        assert "Organization" in prompt
+
+    def test_includes_page_text_directly(self):
         scraped = dict(self.SCRAPED)
         scraped["nav_pages"] = [
             {
                 "url": "https://example.com/long",
                 "url_path": "/long",
                 "title": "Long Page",
-                "meta_description": None,
-                "body_excerpt": "X" * 500,
+                "text": "X" * 500,
             }
         ]
         prompt = build_user_prompt(scraped, "Account")
-        # Should contain at most 300 Xs in a row
-        assert "X" * 301 not in prompt
-        assert "X" * 300 in prompt
+        # Page text is included verbatim (truncation happens in scraper, not here)
+        assert "X" * 100 in prompt
 
-    def test_handles_none_fields_gracefully(self):
+    def test_handles_missing_homepage_gracefully(self):
         scraped = {
             "base_url": "https://example.com",
-            "brand_name": None,
             "language": None,
-            "currency": None,
-            "tagline": None,
-            "trust_signals": [],
+            "homepage": None,
             "nav_pages": [],
             "secondary_pages": {},
             "json_ld": [],
             "open_graph": {},
         }
         prompt = build_user_prompt(scraped, "Account")
-        assert "(unknown)" in prompt
-        assert "(none detected)" in prompt
+        assert "https://example.com" in prompt
+        assert "no page content scraped" in prompt
+
+    def test_handles_empty_nav_pages(self):
+        scraped = dict(self.SCRAPED)
+        scraped["nav_pages"] = []
+        prompt = build_user_prompt(scraped, "Account")
+        # Should still work and include homepage
+        assert "https://example.com" in prompt
 
 
 # ===========================================================================

@@ -313,19 +313,26 @@ def render_scrape_summary():
     st.success("Website scraped successfully.")
     st.markdown("### Scraped Data Summary")
 
-    col1, col2, col3, col4 = st.columns(4)
-    col1.metric("Brand", data.get("brand_name") or "—")
-    col2.metric("Language", data.get("language") or "—")
-    col3.metric("Currency", data.get("currency") or "—")
-    col4.metric("Nav pages found", len(data.get("nav_pages", [])))
-
-    trust = data.get("trust_signals", [])
-    if trust:
-        with st.expander(f"Trust signals ({len(trust)})"):
-            for s in trust:
-                st.markdown(f"- {s}")
-
+    nav_pages = data.get("nav_pages", [])
     secondary = {k: v for k, v in data.get("secondary_pages", {}).items() if v}
+    homepage = data.get("homepage", {})
+
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Language", data.get("language") or "—")
+    col2.metric("Nav pages scraped", len(nav_pages))
+    col3.metric("Secondary pages", len(secondary))
+
+    if homepage:
+        st.caption(f"Homepage: **{homepage.get('title') or data.get('base_url', '')}**")
+
+    if nav_pages:
+        with st.expander(f"Navigation pages ({len(nav_pages)})"):
+            for p in nav_pages:
+                st.markdown(
+                    f"- **{p.get('title') or p.get('url_path', '')}** "
+                    f"— `{p.get('url_path', '')}`"
+                )
+
     if secondary:
         with st.expander(f"Secondary pages found ({len(secondary)})"):
             for slug, page in secondary.items():

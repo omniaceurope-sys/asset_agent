@@ -194,7 +194,6 @@ def run_scraper(url: str) -> dict:
     Run the scraper and print a progress summary.
     Re-raises ScraperError on unrecoverable failure.
     """
-    # Import here so the module can be used independently
     sys.path.insert(0, str(Path(__file__).parent))
     from scraper import scrape_site, ScraperError  # noqa: PLC0415
 
@@ -205,16 +204,12 @@ def run_scraper(url: str) -> dict:
     except ScraperError as e:
         sys.exit(f"ERROR: Scraper failed — {e}")
 
-    brand = data.get("brand_name") or "(unknown brand)"
     lang = data.get("language") or "unknown"
     nav_count = len(data.get("nav_pages", []))
-    trust_count = len(data.get("trust_signals", []))
     secondary_found = [k for k, v in data.get("secondary_pages", {}).items() if v is not None]
 
-    print(f"  Brand:         {brand}")
     print(f"  Language:      {lang}")
     print(f"  Nav pages:     {nav_count}")
-    print(f"  Trust signals: {trust_count}")
     if secondary_found:
         print(f"  Secondary pages found: {', '.join(secondary_found)}")
     if data.get("scrape_errors"):
@@ -229,25 +224,41 @@ def run_scraper(url: str) -> dict:
 # ---------------------------------------------------------------------------
 
 def build_user_prompt(scraped_data: dict, account_name: str) -> str:
-    """Format scraped data into the Claude user message."""
+    """
+    Format raw scraped page text into the Claude user message.
+    Claude receives full page text and figures out brand, products,
+    selling points, and trust signals itself.
+    """
+    base_url = scraped_data.get("base_url", "")
+    language = scraped_data.get("language") or "unknown"
 
-    def fmt_page(page: dict) -> str:
-        lines = [f"  [{page.get('url_path', page.get('url', ''))}] {page.get('title', '')}"]
-        if page.get("meta_description"):
-            lines.append(f"    Meta: {page['meta_description']}")
-        if page.get("body_excerpt"):
-            lines.append(f"    Excerpt: {page['body_excerpt'][:300]}")
-        return "\n".join(lines)
+    # Build page text blocks
+    page_blocks = []
 
-    nav_pages_block = "\n".join(
-        fmt_page(p) for p in scraped_data.get("nav_pages", [])
-    ) or "  (none scraped)"
+    homepage = scraped_data.get("homepage")
+    if homepage:
+        title = homepage.get("title") or base_url
+        text = homepage.get("text", "").strip()
+        page_blocks.append(f"HOMEPAGE — {title}\nURL: {base_url}\n{text}")
 
-    secondary_block = "\n".join(
-        fmt_page(v) for k, v in scraped_data.get("secondary_pages", {}).items() if v
-    ) or "  (none found)"
+    for page in scraped_data.get("nav_pages", []):
+        title = page.get("title") or page.get("url_path", "")
+        text = page.get("text", "").strip()
+        page_blocks.append(
+            f"PAGE [{page.get('url_path', '')}] {title}\n{text}"
+        )
 
-    # Summarise JSON-LD (avoid dumping raw nested objects)
+    for slug, page in scraped_data.get("secondary_pages", {}).items():
+        if page:
+            title = page.get("title") or slug
+            text = page.get("text", "").strip()
+            page_blocks.append(
+                f"PAGE [{page.get('url_path', '')}] {title}\n{text}"
+            )
+
+    pages_block = "\n\n---\n\n".join(page_blocks) or "(no page content scraped)"
+
+    # JSON-LD summary (structured data, often contains product/org info)
     ld_lines = []
     for obj in scraped_data.get("json_ld", [])[:5]:
         graph = obj.get("@graph", [obj])
@@ -259,41 +270,29 @@ def build_user_prompt(scraped_data: dict, account_name: str) -> str:
                 ld_lines.append(f"  type={ld_type} name={name} desc={desc[:100]}")
     ld_block = "\n".join(ld_lines) or "  (none)"
 
-    trust_block = "\n".join(
-        f"  - {s}" for s in scraped_data.get("trust_signals", [])
-    ) or "  (none detected)"
-
     return f"""Account: {account_name}
-Website: {scraped_data.get('base_url', '')}
+Website: {base_url}
+Detected language: {language}
 
---- SCRAPED DATA ---
+--- PAGE CONTENT ---
 
-Brand:    {scraped_data.get('brand_name') or '(unknown)'}
-Language: {scraped_data.get('language') or '(unknown)'}
-Currency: {scraped_data.get('currency') or '(unknown)'}
-Tagline:  {scraped_data.get('tagline') or '(none)'}
+{pages_block}
 
-Trust Signals:
-{trust_block}
+--- STRUCTURED DATA (JSON-LD) ---
 
-Navigation Pages:
-{nav_pages_block}
-
-Secondary Pages:
-{secondary_block}
-
-JSON-LD Summary:
 {ld_block}
 
 --- END SCRAPED DATA ---
 
-Generate:
-  - 8 to 12 sitelinks
+From the page content above, identify: the brand name, product/category structure,
+key selling points, and any trust signals (ratings, guarantees, certifications).
+Then generate:
+  - 8 to 12 sitelinks (product and category pages only)
   - 8 to 12 callouts
   - 3 to 5 structured snippets
 
 Use ONLY structured snippet headers that genuinely match this business.
-Write ALL text in: {scraped_data.get('language') or 'the website language'}.
+Write ALL text in: {language}.
 Output ONLY valid JSON — no markdown, no explanation.
 """
 
