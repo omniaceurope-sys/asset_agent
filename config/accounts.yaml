@@ -1,0 +1,5 @@
+accounts:
+  "1234567890":
+    name: "Brand A - UK"
+  "0987654321":
+    name: "Brand B - DE"
