@@ -130,15 +130,6 @@ def render_sidebar():
 
         st.divider()
 
-        st.warning(
-            "⚠️ **Asset assignment level not decided.**\n\n"
-            "Assets are pushed to the account but are **not assigned** to any "
-            "campaign or ad group. Decide before running:\n"
-            "- Account level\n- Campaign level\n- Manual assignment"
-        )
-
-        st.divider()
-
         with st.expander("📋 How to configure secrets"):
             st.markdown("""
 **Local development**
@@ -664,11 +655,6 @@ def render_push_results(account_id: str, account_name: str):
             for item in all_failed:
                 st.markdown(f"- {item}")
 
-    st.warning(
-        "⚠️ **Reminder:** Assets have been created in the account but are **not yet "
-        "assigned** to any campaign or ad group. Please decide on assignment level "
-        "(account-wide, campaign-level, or manual) in Google Ads."
-    )
 
 
 def _render_fallback_assets():

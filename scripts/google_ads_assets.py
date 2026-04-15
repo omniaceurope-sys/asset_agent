@@ -63,19 +63,6 @@ SNIPPET_HEADERS_EN = [
 ]
 
 # ---------------------------------------------------------------------------
-# Assignment-level reminder (shown at start and end of every run)
-# ---------------------------------------------------------------------------
-
-ASSIGNMENT_REMINDER = """
-⚠️  REMINDER: Asset assignment level is NOT yet decided.
-    Assets are created in the account but NOT assigned to any campaign or ad group.
-    Please decide whether to assign at:
-      - Account level (applies to all campaigns automatically)
-      - Campaign level (you choose which campaigns)
-      - Manually (you assign them yourself in Google Ads UI)
-"""
-
-# ---------------------------------------------------------------------------
 # Claude system prompt (static — cached by Anthropic API)
 # ---------------------------------------------------------------------------
 
@@ -865,7 +852,6 @@ def print_summary(
     if all_failed:
         print(f"  Failures: {', '.join(all_failed)}")
     print("=" * 60)
-    print(ASSIGNMENT_REMINDER)
 
 
 # ---------------------------------------------------------------------------
@@ -888,7 +874,6 @@ def main() -> None:
     account_name = accounts.get(account_id, {}).get("name", account_id) if accounts else account_id
 
     print(f"\nAccount: {account_id} ({account_name})")
-    print(ASSIGNMENT_REMINDER)
 
     # --- Resolve URL ---
     url = args.url
