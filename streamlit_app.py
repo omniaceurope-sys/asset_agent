@@ -43,17 +43,15 @@ def _get_anthropic_key() -> str | None:
 
 
 def _get_google_ads_creds() -> dict | None:
-    """Return Google Ads credentials dict from secrets or config file."""
+    """Return Google Ads credentials dict from secrets or local config file."""
     try:
         creds = dict(st.secrets["google_ads"])
-        # Reject placeholder values
         if str(creds.get("developer_token", "")).startswith("X"):
             return None
         return creds
     except (KeyError, FileNotFoundError):
         pass
 
-    # Fallback: read local config/google_ads.yaml
     config_path = Path(__file__).parent / "config" / "google_ads.yaml"
     if config_path.exists():
         import yaml
@@ -65,7 +63,10 @@ def _get_google_ads_creds() -> dict | None:
 
 
 def _get_accounts() -> dict:
-    """Return {account_id: name} from secrets or config file."""
+    """
+    Return {account_id: name} from secrets or config file.
+    Used as a fallback when Ads credentials are not configured.
+    """
     try:
         raw = dict(st.secrets.get("accounts", {}))
         return {k: (v if isinstance(v, str) else v.get("name", k)) for k, v in raw.items()}
@@ -87,21 +88,14 @@ def _get_accounts() -> dict:
 # UI helpers
 # ---------------------------------------------------------------------------
 
-def _char_color(n: int, limit: int) -> str:
-    """Return a color string based on character usage."""
-    if n > limit:
-        return "red"
-    if n / limit > 0.85:
-        return "orange"
-    return "green"
-
-
 def _char_label(text: str, limit: int) -> str:
     """Return a colored markdown character-count badge."""
     n = len(text)
-    color = _char_color(n, limit)
-    icon = "🔴" if n > limit else ("🟡" if n / limit > 0.85 else "🟢")
-    return f":{color}[{icon} {n}/{limit}]"
+    if n > limit:
+        return f":red[🔴 {n}/{limit}]"
+    if n / limit > 0.85:
+        return f":orange[🟡 {n}/{limit}]"
+    return f":green[🟢 {n}/{limit}]"
 
 
 def _normalize_id(raw: str) -> str:
@@ -118,7 +112,8 @@ def render_sidebar():
         st.title("⚙️ Setup")
 
         anthropic_ok = bool(_get_anthropic_key())
-        ads_ok = bool(_get_google_ads_creds())
+        ads_creds = _get_google_ads_creds()
+        ads_ok = bool(ads_creds)
 
         st.markdown("**API Status**")
         st.markdown(
@@ -129,6 +124,9 @@ def render_sidebar():
             f"{'✅' if ads_ok else '⚠️'} Google Ads API "
             f"{'connected' if ads_ok else '**not configured** (generate-only mode)'}"
         )
+        if ads_ok:
+            mcc_id = str(ads_creds.get("login_customer_id", "—"))
+            st.caption(f"MCC: {mcc_id}")
 
         st.divider()
 
@@ -172,27 +170,110 @@ login_customer_id = "..."  # MCC account ID, digits only
 
 
 # ---------------------------------------------------------------------------
-# Step 1 — Inputs
+# MCC account loading
 # ---------------------------------------------------------------------------
 
-def render_inputs() -> tuple[str, str]:
-    st.markdown("## 1. Enter Website & Account")
-    col1, col2 = st.columns([2, 1])
-    with col1:
-        url = st.text_input(
-            "Website URL",
-            placeholder="https://example.com",
-            value=st.session_state.get("url_input", ""),
-            key="url_input",
+def _load_mcc_accounts(ads_creds: dict):
+    """Fetch child accounts from MCC and store in session_state['mcc_accounts']."""
+    from google_ads_assets import init_google_ads_client_from_dict, list_child_accounts
+
+    mcc_id = str(ads_creds.get("login_customer_id", "")).replace("-", "")
+    with st.spinner("Fetching accounts from MCC ..."):
+        try:
+            client = init_google_ads_client_from_dict(ads_creds)
+            accounts = list_child_accounts(client, mcc_id)
+            st.session_state["mcc_accounts"] = accounts
+            # Clear downstream state so switching account starts fresh
+            for k in ("sitelinks", "callouts", "snippets", "push_results",
+                      "scraped_data", "selected_account"):
+                st.session_state.pop(k, None)
+            for k in list(st.session_state.keys()):
+                if k.startswith(("sl_", "co_", "sn_")):
+                    del st.session_state[k]
+        except RuntimeError as e:
+            st.error(f"Could not load accounts: {e}")
+            return
+    st.rerun()
+
+
+# ---------------------------------------------------------------------------
+# Step 1 — Inputs (URL + account selector)
+# ---------------------------------------------------------------------------
+
+def render_inputs() -> tuple[str, str, str]:
+    """
+    Render URL input and account selector.
+    Returns (url, account_id, account_name).
+    """
+    st.markdown("## 1. Select Website & Account")
+
+    # --- Website URL ---
+    url = st.text_input(
+        "Website URL",
+        placeholder="https://example.com",
+        key="url_input",
+    )
+
+    st.markdown("**Google Ads Account**")
+
+    ads_creds = _get_google_ads_creds()
+
+    if ads_creds:
+        # --- MCC-driven account selector ---
+        sel_col, btn_col = st.columns([4, 1])
+
+        with btn_col:
+            st.markdown("&nbsp;", unsafe_allow_html=True)  # vertical alignment nudge
+            if st.button("🔄 Load Accounts", help="Fetch all child accounts from your MCC"):
+                _load_mcc_accounts(ads_creds)
+
+        accounts = st.session_state.get("mcc_accounts")
+
+        if accounts is None:
+            with sel_col:
+                st.info("Click **Load Accounts** to fetch your accounts from the MCC.")
+            return url.strip(), "", ""
+
+        if not accounts:
+            with sel_col:
+                st.warning("No enabled child accounts found under the MCC.")
+            return url.strip(), "", ""
+
+        def _fmt(i: int) -> str:
+            a = accounts[i]
+            return f"{a['name']}  ({a['id']})  —  {a['currency']}  ·  {a['timezone']}"
+
+        with sel_col:
+            idx = st.selectbox(
+                "Select account",
+                options=range(len(accounts)),
+                format_func=_fmt,
+                key="account_select_idx",
+                label_visibility="collapsed",
+            )
+
+        selected = accounts[idx]
+        st.session_state["selected_account"] = selected
+
+        # Show a compact info badge for the selected account
+        st.caption(
+            f"ID: `{selected['id']}`  ·  "
+            f"Currency: **{selected['currency']}**  ·  "
+            f"Timezone: {selected['timezone']}"
         )
-    with col2:
-        account_id = st.text_input(
-            "Google Ads Account ID",
+        return url.strip(), selected["id"], selected["name"]
+
+    else:
+        # --- Fallback: manual text input (no Ads credentials) ---
+        account_id_raw = st.text_input(
+            "Account ID",
             placeholder="123-456-7890",
-            value=st.session_state.get("account_id_input", ""),
             key="account_id_input",
         )
-    return url.strip(), account_id.strip()
+        norm_id = _normalize_id(account_id_raw)
+        known_accounts = _get_accounts()
+        name = known_accounts.get(norm_id, norm_id or "Unknown Account")
+        return url.strip(), norm_id, name
 
 
 # ---------------------------------------------------------------------------
@@ -202,6 +283,9 @@ def render_inputs() -> tuple[str, str]:
 def render_scrape_button(url: str, account_id: str):
     if not url:
         st.info("Enter a website URL to get started.")
+        return
+    if not account_id:
+        st.info("Select a Google Ads account before scraping.")
         return
 
     if st.button("🔍 Scrape Website", type="primary"):
@@ -222,9 +306,11 @@ def _run_scrape(url: str):
             return
 
     st.session_state["scraped_data"] = data
-    # Clear downstream state when re-scraping
     for key in ("sitelinks", "callouts", "snippets", "push_results"):
         st.session_state.pop(key, None)
+    for k in list(st.session_state.keys()):
+        if k.startswith(("sl_", "co_", "sn_")):
+            del st.session_state[k]
     st.rerun()
 
 
@@ -264,7 +350,7 @@ def render_scrape_summary():
 # Step 3 — Generate with Claude
 # ---------------------------------------------------------------------------
 
-def render_generate_button(account_id: str):
+def render_generate_button(account_id: str, account_name: str):
     if "scraped_data" not in st.session_state:
         return
 
@@ -277,10 +363,7 @@ def render_generate_button(account_id: str):
         return
 
     st.markdown("## 2. Generate Assets with Claude")
-
-    accounts = _get_accounts()
-    norm_id = _normalize_id(account_id) if account_id else ""
-    account_name = accounts.get(norm_id, norm_id or "Unknown Account")
+    st.caption(f"Generating for: **{account_name}** (`{account_id}`)")
 
     if st.button("✨ Generate Assets", type="primary"):
         _run_generate(anthropic_key, account_name)
@@ -309,7 +392,6 @@ def _run_generate(anthropic_key: str, account_name: str):
             for w in warnings:
                 st.warning(w)
 
-    # Store in session state as editable copies
     st.session_state["sitelinks"] = assets.get("sitelinks", [])
     st.session_state["callouts"] = assets.get("callouts", [])
     st.session_state["snippets"] = assets.get("structured_snippets", [])
@@ -352,7 +434,6 @@ def _render_sitelinks_editor():
         d2_key = f"sl_{i}_d2"
         url_key = f"sl_{i}_url"
 
-        # Seed defaults on first render
         if title_key not in st.session_state:
             st.session_state[title_key] = sl.get("title", "")
             st.session_state[d1_key] = sl.get("description1", "")
@@ -366,27 +447,15 @@ def _render_sitelinks_editor():
             col1, col2, col3 = st.columns(3)
 
             with col1:
-                st.text_input(
-                    "Title",
-                    max_chars=SITELINK_TITLE_LIMIT,
-                    key=title_key,
-                )
+                st.text_input("Title", max_chars=SITELINK_TITLE_LIMIT, key=title_key)
                 st.caption(_char_label(st.session_state[title_key], SITELINK_TITLE_LIMIT))
 
             with col2:
-                st.text_input(
-                    "Description line 1",
-                    max_chars=SITELINK_DESC_LIMIT,
-                    key=d1_key,
-                )
+                st.text_input("Description line 1", max_chars=SITELINK_DESC_LIMIT, key=d1_key)
                 st.caption(_char_label(st.session_state[d1_key], SITELINK_DESC_LIMIT))
 
             with col3:
-                st.text_input(
-                    "Description line 2",
-                    max_chars=SITELINK_DESC_LIMIT,
-                    key=d2_key,
-                )
+                st.text_input("Description line 2", max_chars=SITELINK_DESC_LIMIT, key=d2_key)
                 st.caption(_char_label(st.session_state[d2_key], SITELINK_DESC_LIMIT))
 
             st.text_input("Final URL", key=url_key)
@@ -401,13 +470,8 @@ def _render_callouts_editor():
         key = f"co_{i}"
         if key not in st.session_state:
             st.session_state[key] = text
-
         with cols[i % 3]:
-            st.text_input(
-                f"Callout {i + 1}",
-                max_chars=CALLOUT_LIMIT,
-                key=key,
-            )
+            st.text_input(f"Callout {i + 1}", max_chars=CALLOUT_LIMIT, key=key)
             st.caption(_char_label(st.session_state[key], CALLOUT_LIMIT))
 
 
@@ -431,11 +495,7 @@ def _render_snippets_editor():
                 if val_key not in st.session_state:
                     st.session_state[val_key] = val
                 with val_cols[j % 5]:
-                    st.text_input(
-                        f"Value {j + 1}",
-                        max_chars=SNIPPET_VAL_LIMIT,
-                        key=val_key,
-                    )
+                    st.text_input(f"Value {j + 1}", max_chars=SNIPPET_VAL_LIMIT, key=val_key)
                     st.caption(_char_label(st.session_state[val_key], SNIPPET_VAL_LIMIT))
 
 
@@ -478,20 +538,22 @@ def _collect_edited_assets() -> dict:
 # Step 5 — Push to Google Ads
 # ---------------------------------------------------------------------------
 
-def render_push_section(account_id: str):
+def render_push_section(account_id: str, account_name: str):
     if "sitelinks" not in st.session_state:
         return
 
     ads_creds = _get_google_ads_creds()
     st.markdown("## 4. Push to Google Ads")
 
+    if account_id and account_name:
+        st.caption(f"Target: **{account_name}** (`{account_id}`)")
+
     col1, col2 = st.columns(2)
     with col1:
         push_disabled = not ads_creds or not account_id
         push_help = (
-            "Google Ads credentials not configured."
-            if not ads_creds
-            else ("Enter an account ID above." if not account_id else None)
+            "Google Ads credentials not configured." if not ads_creds
+            else ("No account selected." if not account_id else None)
         )
         if st.button(
             "🚀 Push to Google Ads",
@@ -505,7 +567,6 @@ def render_push_section(account_id: str):
         if st.button("🔄 Regenerate Assets"):
             for key in ("sitelinks", "callouts", "snippets", "push_results"):
                 st.session_state.pop(key, None)
-            # Clear editor keys
             for k in list(st.session_state.keys()):
                 if k.startswith(("sl_", "co_", "sn_")):
                     del st.session_state[k]
@@ -514,8 +575,7 @@ def render_push_section(account_id: str):
     if not ads_creds:
         st.info(
             "Google Ads credentials not configured. "
-            "The assets above were generated successfully and can be created manually. "
-            "See the sidebar for setup instructions."
+            "Assets were generated successfully — see below for manual creation."
         )
         _render_fallback_assets()
 
@@ -538,7 +598,7 @@ def _run_push(ads_creds: dict, account_id: str):
         for w in warnings:
             st.warning(w)
 
-    with st.spinner("Connecting to Google Ads and pushing assets ..."):
+    with st.spinner(f"Pushing assets to account {norm_id} ..."):
         try:
             client = init_google_ads_client_from_dict(ads_creds)
         except RuntimeError as e:
@@ -552,58 +612,47 @@ def _run_push(ads_creds: dict, account_id: str):
             return
 
         results = {}
-        try:
-            results["sitelinks"] = push_sitelinks(
-                client, norm_id, cleaned["sitelinks"], existing
-            )
-        except Exception as e:
-            st.error(f"Failed to push sitelinks: {e}")
-            results["sitelinks"] = {"created": 0, "skipped": 0, "failed": len(cleaned["sitelinks"]), "failed_items": []}
-
-        try:
-            results["callouts"] = push_callouts(
-                client, norm_id, cleaned["callouts"], existing
-            )
-        except Exception as e:
-            st.error(f"Failed to push callouts: {e}")
-            results["callouts"] = {"created": 0, "skipped": 0, "failed": len(cleaned["callouts"]), "failed_items": []}
-
-        try:
-            results["structured_snippets"] = push_structured_snippets(
-                client, norm_id, cleaned["structured_snippets"], existing
-            )
-        except Exception as e:
-            st.error(f"Failed to push structured snippets: {e}")
-            results["structured_snippets"] = {"created": 0, "skipped": 0, "failed": len(cleaned["structured_snippets"]), "failed_items": []}
+        for asset_type, push_fn, items in [
+            ("sitelinks", push_sitelinks, cleaned["sitelinks"]),
+            ("callouts", push_callouts, cleaned["callouts"]),
+            ("structured_snippets", push_structured_snippets, cleaned["structured_snippets"]),
+        ]:
+            try:
+                results[asset_type] = push_fn(client, norm_id, items, existing)
+            except Exception as e:
+                st.error(f"Failed to push {asset_type}: {e}")
+                results[asset_type] = {
+                    "created": 0, "skipped": 0,
+                    "failed": len(items), "failed_items": [],
+                }
 
     st.session_state["push_results"] = results
     st.rerun()
 
 
-def render_push_results(account_id: str):
+def render_push_results(account_id: str, account_name: str):
     results = st.session_state.get("push_results")
     if not results:
         return
-
-    st.markdown("## Results")
-    accounts = _get_accounts()
-    norm_id = _normalize_id(account_id) if account_id else ""
-    account_name = accounts.get(norm_id, norm_id or "—")
 
     sl = results.get("sitelinks", {})
     co = results.get("callouts", {})
     sn = results.get("structured_snippets", {})
     total = sl.get("created", 0) + co.get("created", 0) + sn.get("created", 0)
 
-    st.success(f"Push complete — **{total} assets created** for account {norm_id} ({account_name})")
+    st.markdown("## Results")
+    st.success(
+        f"Push complete — **{total} assets created** "
+        f"for **{account_name}** (`{account_id}`)"
+    )
 
     col1, col2, col3 = st.columns(3)
-    col1.metric("Sitelinks", f"✓ {sl.get('created',0)} created",
-                f"⊘ {sl.get('skipped',0)} skipped  ✗ {sl.get('failed',0)} failed")
-    col2.metric("Callouts", f"✓ {co.get('created',0)} created",
-                f"⊘ {co.get('skipped',0)} skipped  ✗ {co.get('failed',0)} failed")
-    col3.metric("Snippets", f"✓ {sn.get('created',0)} created",
-                f"⊘ {sn.get('skipped',0)} skipped  ✗ {sn.get('failed',0)} failed")
+    col1.metric("Sitelinks", f"✓ {sl.get('created', 0)} created",
+                f"⊘ {sl.get('skipped', 0)} skipped  ✗ {sl.get('failed', 0)} failed")
+    col2.metric("Callouts", f"✓ {co.get('created', 0)} created",
+                f"⊘ {co.get('skipped', 0)} skipped  ✗ {co.get('failed', 0)} failed")
+    col3.metric("Snippets", f"✓ {sn.get('created', 0)} created",
+                f"⊘ {sn.get('skipped', 0)} skipped  ✗ {sn.get('failed', 0)} failed")
 
     all_failed = (
         sl.get("failed_items", []) +
@@ -623,7 +672,7 @@ def render_push_results(account_id: str):
 
 
 def _render_fallback_assets():
-    """Show assets as plain text when Google Ads is not configured."""
+    """Show assets as plain text for manual creation when Ads API is unavailable."""
     if "sitelinks" not in st.session_state:
         return
 
@@ -638,7 +687,8 @@ def _render_fallback_assets():
             )
 
         st.markdown("**CALLOUTS**")
-        st.markdown("  |  ".join(f"`{c}`" for c in assets["callouts"]))
+        if assets["callouts"]:
+            st.markdown("  |  ".join(f"`{c}`" for c in assets["callouts"]))
 
         st.markdown("**STRUCTURED SNIPPETS**")
         for sn in assets["structured_snippets"]:
@@ -655,12 +705,12 @@ def main():
 
     st.title("🎯 Google Ads Asset Builder")
     st.caption(
-        "Scrape a website, generate sitelinks/callouts/snippets with Claude, "
-        "and push them directly to Google Ads."
+        "Scrape a website, generate sitelinks / callouts / structured snippets with Claude, "
+        "and push them directly to a Google Ads account."
     )
     st.divider()
 
-    url, account_id = render_inputs()
+    url, account_id, account_name = render_inputs()
 
     st.divider()
     render_scrape_button(url, account_id)
@@ -668,17 +718,17 @@ def main():
 
     if st.session_state.get("scraped_data"):
         st.divider()
-        render_generate_button(account_id)
+        render_generate_button(account_id, account_name)
 
     if st.session_state.get("sitelinks") is not None:
         st.divider()
         render_assets()
         st.divider()
-        render_push_section(account_id)
+        render_push_section(account_id, account_name)
 
     if st.session_state.get("push_results"):
         st.divider()
-        render_push_results(account_id)
+        render_push_results(account_id, account_name)
 
 
 if __name__ == "__main__":

@@ -497,6 +497,44 @@ def init_google_ads_client_from_dict(credentials: dict):
         raise RuntimeError(f"Could not initialize Google Ads client: {e}") from e
 
 
+def list_child_accounts(client, mcc_id: str) -> list[dict]:
+    """
+    Return all enabled non-manager (leaf) accounts under the MCC.
+
+    Each dict: {"id": str, "name": str, "currency": str, "timezone": str}
+    Sorted alphabetically by name.
+    Raises RuntimeError if the API query fails.
+    """
+    ga_service = client.get_service("GoogleAdsService")
+    query = """
+        SELECT
+            customer_client.id,
+            customer_client.descriptive_name,
+            customer_client.currency_code,
+            customer_client.time_zone,
+            customer_client.manager,
+            customer_client.status
+        FROM customer_client
+        WHERE customer_client.manager = false
+          AND customer_client.status = 'ENABLED'
+    """
+    accounts = []
+    try:
+        stream = ga_service.search_stream(customer_id=mcc_id, query=query)
+        for batch in stream:
+            for row in batch.results:
+                cc = row.customer_client
+                accounts.append({
+                    "id": str(cc.id),
+                    "name": cc.descriptive_name or f"Account {cc.id}",
+                    "currency": cc.currency_code,
+                    "timezone": cc.time_zone,
+                })
+    except Exception as e:
+        raise RuntimeError(f"Could not list child accounts: {e}") from e
+    return sorted(accounts, key=lambda x: x["name"].lower())
+
+
 # ---------------------------------------------------------------------------
 # Fetch existing assets (duplicate detection)
 # ---------------------------------------------------------------------------
