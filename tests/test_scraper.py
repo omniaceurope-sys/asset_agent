@@ -23,14 +23,13 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
 from scraper import (
     ScraperError,
     _absolute_url,
+    _extract_all_internal_links,
     _extract_json_ld,
     _extract_language,
-    _extract_nav_links,
     _extract_open_graph,
     _extract_page_text,
     _extract_title,
     _fetch,
-    _find_secondary_pages,
     _normalize_url,
     _same_domain,
     scrape_site,
@@ -297,125 +296,74 @@ class TestExtractPageText:
 
 
 # ===========================================================================
-# _extract_nav_links
+# _extract_all_internal_links
 # ===========================================================================
 
-class TestExtractNavLinks:
+class TestExtractAllInternalLinks:
     BASE = "https://example.com"
 
-    def test_extracts_nav_links(self):
+    def test_extracts_internal_links(self):
         html = '''<html><body>
         <nav>
           <a href="/shop">Shop</a>
           <a href="/about">About</a>
         </nav>
         </body></html>'''
-        links = _extract_nav_links(make_soup(html), self.BASE)
+        links = _extract_all_internal_links(make_soup(html), self.BASE)
         urls = [l["url"] for l in links]
         assert "https://example.com/shop" in urls
         assert "https://example.com/about" in urls
 
     def test_excludes_homepage_link(self):
         html = '''<html><body>
-        <nav>
           <a href="/">Home</a>
           <a href="/shop">Shop</a>
-        </nav>
         </body></html>'''
-        links = _extract_nav_links(make_soup(html), self.BASE)
+        links = _extract_all_internal_links(make_soup(html), self.BASE)
         urls = [l["url"] for l in links]
         assert self.BASE not in urls
         assert "https://example.com/shop" in urls
 
     def test_excludes_external_links(self):
         html = '''<html><body>
-        <nav>
           <a href="https://external.com/page">External</a>
           <a href="/internal">Internal</a>
-        </nav>
         </body></html>'''
-        links = _extract_nav_links(make_soup(html), self.BASE)
+        links = _extract_all_internal_links(make_soup(html), self.BASE)
         urls = [l["url"] for l in links]
         assert "https://external.com/page" not in urls
         assert "https://example.com/internal" in urls
 
     def test_deduplicates_urls(self):
         html = '''<html><body>
-        <nav>
           <a href="/shop">Shop Link 1</a>
           <a href="/shop">Shop Link 2</a>
-        </nav>
         </body></html>'''
-        links = _extract_nav_links(make_soup(html), self.BASE)
+        links = _extract_all_internal_links(make_soup(html), self.BASE)
         urls = [l["url"] for l in links]
         assert urls.count("https://example.com/shop") == 1
 
-    def test_skips_links_with_very_long_text(self):
-        long_text = "A" * 61
-        html = f'''<html><body>
-        <nav>
-          <a href="/page">{long_text}</a>
-          <a href="/short">Short</a>
-        </nav>
+    def test_skips_cart_and_login(self):
+        html = '''<html><body>
+          <a href="/cart">Cart</a>
+          <a href="/login">Login</a>
+          <a href="/shop">Shop</a>
         </body></html>'''
-        links = _extract_nav_links(make_soup(html), self.BASE)
-        texts = [l["text"] for l in links]
-        assert long_text not in texts
-        assert "Short" in texts
+        links = _extract_all_internal_links(make_soup(html), self.BASE)
+        urls = [l["url"] for l in links]
+        assert "https://example.com/cart" not in urls
+        assert "https://example.com/login" not in urls
+        assert "https://example.com/shop" in urls
 
     def test_skips_mailto_and_tel(self):
         html = '''<html><body>
-        <nav>
           <a href="mailto:hi@example.com">Email</a>
           <a href="tel:123456">Call</a>
           <a href="/shop">Shop</a>
-        </nav>
         </body></html>'''
-        links = _extract_nav_links(make_soup(html), self.BASE)
+        links = _extract_all_internal_links(make_soup(html), self.BASE)
         urls = [l["url"] for l in links]
         assert all(u.startswith("https://") for u in urls)
-
-
-# ===========================================================================
-# _find_secondary_pages
-# ===========================================================================
-
-class TestFindSecondaryPages:
-    BASE = "https://example.com"
-
-    def test_matches_slug_in_path(self):
-        links = [
-            {"text": "Our Story", "url": "https://example.com/about-us"},
-            {"text": "Get in Touch", "url": "https://example.com/contact"},
-        ]
-        result = _find_secondary_pages(links, self.BASE)
-        assert result["about"] == "https://example.com/about-us"
-        assert result["contact"] == "https://example.com/contact"
-
-    def test_matches_slug_in_link_text(self):
-        links = [
-            {"text": "About Us", "url": "https://example.com/company"},
-        ]
-        result = _find_secondary_pages(links, self.BASE)
-        assert result.get("about") == "https://example.com/company"
-
-    def test_first_match_wins(self):
-        links = [
-            {"text": "About Page 1", "url": "https://example.com/about1"},
-            {"text": "About Page 2", "url": "https://example.com/about2"},
-        ]
-        result = _find_secondary_pages(links, self.BASE)
-        assert result.get("about") == "https://example.com/about1"
-
-    def test_returns_empty_when_no_matches(self):
-        links = [{"text": "Shop", "url": "https://example.com/shop"}]
-        result = _find_secondary_pages(links, self.BASE)
-        assert "about" not in result
-
-    def test_matches_shipping_slug(self):
-        links = [{"text": "Delivery Info", "url": "https://example.com/shipping-info"}]
-        result = _find_secondary_pages(links, self.BASE)
-        assert result.get("shipping") == "https://example.com/shipping-info"
 
 
 # ===========================================================================
@@ -507,37 +455,25 @@ class TestScrapeSite:
         mock.raise_for_status.return_value = None
         return mock
 
-    @patch("scraper._is_allowed_by_robots", return_value=True)
     @patch("scraper.requests.Session")
-    def test_returns_complete_structure(self, MockSession, mock_robots):
+    def test_returns_complete_structure(self, MockSession):
         session_instance = MockSession.return_value
-        session_instance.get.side_effect = [
-            self._make_mock_response(SAMPLE_HOMEPAGE_HTML),  # homepage
-            self._make_mock_response(SAMPLE_PAGE_HTML),       # /shop
-            self._make_mock_response(SAMPLE_PAGE_HTML),       # /about
-            self._make_mock_response(SAMPLE_PAGE_HTML),       # /contact
-            self._make_mock_response(SAMPLE_PAGE_HTML),       # /shipping
-            self._make_mock_response(SAMPLE_PAGE_HTML),       # secondary: about
-            self._make_mock_response(SAMPLE_PAGE_HTML),       # secondary: contact
-            self._make_mock_response(SAMPLE_PAGE_HTML),       # secondary: shipping
-            self._make_mock_response(SAMPLE_PAGE_HTML),       # secondary: returns
-            self._make_mock_response(SAMPLE_PAGE_HTML),       # secondary: faq
-        ]
+        # homepage + up to 6 nav pages from SAMPLE_HOMEPAGE_HTML links
+        session_instance.get.return_value = self._make_mock_response(SAMPLE_HOMEPAGE_HTML)
 
         result = scrape_site("https://example.com")
 
         assert result["base_url"] == "https://example.com"
         assert result["language"] == "en-GB"
         assert isinstance(result["homepage"], dict)
+        assert isinstance(result["all_links"], list)
         assert isinstance(result["nav_pages"], list)
-        assert isinstance(result["secondary_pages"], dict)
         assert isinstance(result["json_ld"], list)
         assert isinstance(result["open_graph"], dict)
         assert isinstance(result["scrape_errors"], list)
 
-    @patch("scraper._is_allowed_by_robots", return_value=True)
     @patch("scraper.requests.Session")
-    def test_homepage_contains_page_text(self, MockSession, mock_robots):
+    def test_homepage_contains_page_text(self, MockSession):
         session_instance = MockSession.return_value
         session_instance.get.return_value = self._make_mock_response(SAMPLE_HOMEPAGE_HTML)
 
@@ -549,22 +485,17 @@ class TestScrapeSite:
         assert isinstance(homepage["text"], str)
         assert len(homepage["text"]) > 0
 
-    @patch("scraper._is_allowed_by_robots", return_value=True)
     @patch("scraper.requests.Session")
-    def test_homepage_text_excludes_nav(self, MockSession, mock_robots):
+    def test_homepage_text_excludes_nav(self, MockSession):
         session_instance = MockSession.return_value
         session_instance.get.return_value = self._make_mock_response(SAMPLE_HOMEPAGE_HTML)
 
         result = scrape_site("https://example.com")
-        # Nav links text should be removed from the text
         homepage_text = result["homepage"]["text"]
-        # "Shop" and "About" appear in nav, should not appear as isolated nav items
-        # (they might appear in body content though, so just check the page has content)
         assert isinstance(homepage_text, str)
 
-    @patch("scraper._is_allowed_by_robots", return_value=True)
     @patch("scraper.requests.Session")
-    def test_raises_scraper_error_when_homepage_unreachable(self, MockSession, mock_robots):
+    def test_raises_scraper_error_when_homepage_unreachable(self, MockSession):
         import requests
         session_instance = MockSession.return_value
         session_instance.get.side_effect = requests.exceptions.ConnectionError("Connection refused")
@@ -572,20 +503,18 @@ class TestScrapeSite:
         with pytest.raises(ScraperError):
             scrape_site("https://unreachable.example.com")
 
-    @patch("scraper._is_allowed_by_robots", return_value=True)
     @patch("scraper.requests.Session")
-    def test_detects_nav_links(self, MockSession, mock_robots):
+    def test_all_links_contains_nav_urls(self, MockSession):
         session_instance = MockSession.return_value
         session_instance.get.return_value = self._make_mock_response(SAMPLE_HOMEPAGE_HTML)
 
         result = scrape_site("https://example.com")
-        nav_urls = [p["url"] for p in result["nav_pages"]]
-        assert any("shop" in u for u in nav_urls)
-        assert any("about" in u for u in nav_urls)
+        all_urls = [l["url"] for l in result["all_links"]]
+        assert any("shop" in u for u in all_urls)
+        assert any("about" in u for u in all_urls)
 
-    @patch("scraper._is_allowed_by_robots", return_value=True)
     @patch("scraper.requests.Session")
-    def test_nav_pages_have_text(self, MockSession, mock_robots):
+    def test_nav_pages_have_text(self, MockSession):
         session_instance = MockSession.return_value
         session_instance.get.return_value = self._make_mock_response(SAMPLE_PAGE_HTML)
 

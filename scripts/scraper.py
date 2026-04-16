@@ -1,9 +1,12 @@
 """
 scraper.py — Website scraper for the Ad Asset Builder Agent.
 
-Fetches pages and returns raw text content for Claude to analyze.
-URL discovery and HTTP fetching are handled here; all interpretation
-(brand, selling points, products, trust signals) is done by Claude.
+Fetches the homepage and returns:
+  - Raw page text (for Claude to understand the brand and products)
+  - All internal links (for Claude to select category sitelinks)
+
+All interpretation — which links are categories, what the brand sells,
+what the selling points are — is done by Claude, not by this module.
 
 Standalone usage:
     python scripts/scraper.py https://example.com
@@ -25,15 +28,9 @@ from bs4 import BeautifulSoup
 # ---------------------------------------------------------------------------
 
 REQUEST_TIMEOUT = 10
-MAX_NAV_PAGES = 15
-HOMEPAGE_TEXT_LIMIT = 4000   # chars of homepage text to send Claude
-PAGE_TEXT_LIMIT = 2000        # chars per nav/secondary page
-
-SECONDARY_PAGE_SLUGS = [
-    "about", "contact", "shipping", "delivery",
-    "returns", "refund", "faq", "reviews",
-    "testimonials", "blog", "sale", "offers", "deals",
-]
+MAX_NAV_PAGES = 12
+HOMEPAGE_TEXT_LIMIT = 5000   # chars of homepage text sent to Claude
+PAGE_TEXT_LIMIT = 2000        # chars per additional page
 
 HEADERS = {
     "User-Agent": (
@@ -43,6 +40,15 @@ HEADERS = {
     "Accept-Language": "en-US,en;q=0.9",
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
 }
+
+# Links that are never useful for sitelinks regardless of site type
+_ALWAYS_SKIP = re.compile(
+    r"cart|kosaric|panier|warenkorb|winkelwagen|"
+    r"checkout|login|register|account|wishlist|"
+    r"privacy|terms|cookie|sitemap|search|"
+    r"wp-admin|wp-login|wp-json|feed|rss|xmlrpc",
+    re.I,
+)
 
 logging.basicConfig(level=logging.WARNING, format="%(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -62,18 +68,18 @@ class ScraperError(Exception):
 
 def scrape_site(url: str) -> dict:
     """
-    Fetch a website and return raw page content for Claude to analyze.
+    Fetch a website and return content for Claude to analyze.
 
     Returns:
         {
-            "base_url":        str,
-            "language":        str | None,   # from <html lang="">
-            "homepage":        {url, url_path, title, text},
-            "nav_pages":       [{url, url_path, title, text}, ...],
-            "secondary_pages": {slug: {url, url_path, title, text} | None, ...},
-            "json_ld":         [dict, ...],
-            "open_graph":      {str: str, ...},
-            "scrape_errors":   [str, ...],
+            "base_url":     str,
+            "language":     str | None,
+            "homepage":     {url, url_path, title, text},
+            "all_links":    [{text, url}, ...],   # ALL internal links, Claude selects
+            "nav_pages":    [{url, url_path, title, text}, ...],  # fetched pages
+            "json_ld":      [dict, ...],
+            "open_graph":   {str: str, ...},
+            "scrape_errors": [str, ...],
         }
     """
     errors = []
@@ -82,7 +88,7 @@ def scrape_site(url: str) -> dict:
     session = requests.Session()
     session.headers.update(HEADERS)
 
-    # --- Fetch and parse homepage ---
+    # --- Fetch homepage ---
     response = _fetch(base_url, session)
     if response is None:
         raise ScraperError(
@@ -94,7 +100,6 @@ def scrape_site(url: str) -> dict:
     json_ld = _extract_json_ld(soup)
     open_graph = _extract_open_graph(soup)
     language = _extract_language(soup)
-    nav_links = _extract_nav_links(soup, base_url)
 
     homepage = {
         "url": base_url,
@@ -103,21 +108,18 @@ def scrape_site(url: str) -> dict:
         "text": _extract_page_text(soup, max_chars=HOMEPAGE_TEXT_LIMIT),
     }
 
-    # --- Scrape nav pages (up to MAX_NAV_PAGES) ---
-    nav_pages = _scrape_nav_pages(nav_links, session)
+    # --- Collect ALL internal links (Claude will decide which are categories) ---
+    all_links = _extract_all_internal_links(soup, base_url)
 
-    # --- Find and scrape secondary pages ---
-    footer_links = _extract_footer_links(soup, base_url)
-    all_links = nav_links + footer_links
-    secondary_map = _find_secondary_pages(all_links, base_url)
-    secondary_pages = _scrape_secondary_pages(secondary_map, session)
+    # --- Fetch the top linked pages to give Claude more product/category context ---
+    nav_pages = _scrape_top_pages(all_links, session, max_pages=MAX_NAV_PAGES)
 
     return {
         "base_url": base_url,
         "language": language,
         "homepage": homepage,
+        "all_links": all_links,
         "nav_pages": nav_pages,
-        "secondary_pages": secondary_pages,
         "json_ld": json_ld,
         "open_graph": open_graph,
         "scrape_errors": errors,
@@ -129,7 +131,6 @@ def scrape_site(url: str) -> dict:
 # ---------------------------------------------------------------------------
 
 def _normalize_url(url: str) -> str:
-    """Ensure url has a scheme and strip trailing slash."""
     url = url.strip()
     if not url.lower().startswith(("http://", "https://")):
         url = "https://" + url
@@ -138,19 +139,16 @@ def _normalize_url(url: str) -> str:
         scheme=parsed.scheme.lower(),
         netloc=parsed.netloc.lower(),
     )
-    result = normalized.geturl().rstrip("/")
-    return result
+    return normalized.geturl().rstrip("/")
 
 
 def _same_domain(url: str, base_url: str) -> bool:
-    """Return True if url belongs to the same domain as base_url."""
     base_host = urlparse(base_url).netloc.lstrip("www.")
     url_host = urlparse(url).netloc.lstrip("www.")
     return url_host == base_host or url_host.endswith("." + base_host)
 
 
 def _absolute_url(href: str, base_url: str) -> str | None:
-    """Convert a potentially relative href to an absolute URL, or None if invalid."""
     if not href or href.startswith(("mailto:", "tel:", "javascript:", "#")):
         return None
     absolute = urljoin(base_url, href)
@@ -165,18 +163,13 @@ def _absolute_url(href: str, base_url: str) -> str | None:
 # ---------------------------------------------------------------------------
 
 def _is_allowed_by_robots(base_url: str, target_url: str) -> bool:
-    """
-    Check robots.txt for the given URL. Fail-open: if robots.txt can't be
-    fetched, we assume scraping is allowed.
-    """
     try:
         rp = RobotFileParser()
-        robots_url = base_url.rstrip("/") + "/robots.txt"
-        rp.set_url(robots_url)
+        rp.set_url(base_url.rstrip("/") + "/robots.txt")
         rp.read()
         return rp.can_fetch("AssetBuilderBot", target_url)
     except Exception:
-        return True  # fail-open
+        return True
 
 
 # ---------------------------------------------------------------------------
@@ -184,10 +177,6 @@ def _is_allowed_by_robots(base_url: str, target_url: str) -> bool:
 # ---------------------------------------------------------------------------
 
 def _fetch(url: str, session: requests.Session) -> requests.Response | None:
-    """
-    Fetch a URL. Returns the Response or None on any error.
-    Logs a warning on failure (not an exception — non-fatal for individual pages).
-    """
     try:
         response = session.get(url, timeout=REQUEST_TIMEOUT, allow_redirects=True)
         response.raise_for_status()
@@ -202,11 +191,10 @@ def _fetch(url: str, session: requests.Session) -> requests.Response | None:
 
 
 # ---------------------------------------------------------------------------
-# Page content extraction
+# Content extraction
 # ---------------------------------------------------------------------------
 
 def _extract_title(soup: BeautifulSoup) -> str | None:
-    """Extract page title: prefer <h1>, fall back to <title> tag."""
     h1 = soup.find("h1")
     if h1:
         text = h1.get_text(strip=True)
@@ -219,11 +207,7 @@ def _extract_title(soup: BeautifulSoup) -> str | None:
 
 
 def _extract_page_text(soup: BeautifulSoup, max_chars: int = PAGE_TEXT_LIMIT) -> str:
-    """
-    Extract clean readable text from a page.
-    Removes nav, header, footer, script, style, and other non-content elements.
-    Collapses whitespace and truncates to max_chars.
-    """
+    """Clean body text with nav/footer/script removed, truncated to max_chars."""
     soup_copy = copy.copy(soup)
     for tag in soup_copy(["nav", "header", "footer", "script", "style",
                            "aside", "noscript", "svg", "iframe"]):
@@ -234,7 +218,6 @@ def _extract_page_text(soup: BeautifulSoup, max_chars: int = PAGE_TEXT_LIMIT) ->
 
 
 def _extract_language(soup: BeautifulSoup) -> str | None:
-    """Extract BCP-47 language code from <html lang="">."""
     html_tag = soup.find("html")
     if html_tag and html_tag.get("lang", "").strip():
         return html_tag["lang"].strip()
@@ -244,12 +227,25 @@ def _extract_language(soup: BeautifulSoup) -> str | None:
     return None
 
 
+def _link_display_text(a_tag) -> str | None:
+    """Visible text → img alt → last URL path segment."""
+    text = a_tag.get_text(strip=True)
+    if text:
+        return text[:80]
+    img = a_tag.find("img")
+    if img and img.get("alt", "").strip():
+        return img["alt"].strip()[:80]
+    href = a_tag.get("href", "")
+    segment = urlparse(href).path.rstrip("/").split("/")[-1]
+    segment = segment.replace("-", " ").replace("_", " ").strip()
+    return segment[:80] if segment else None
+
+
 # ---------------------------------------------------------------------------
 # JSON-LD and Open Graph
 # ---------------------------------------------------------------------------
 
 def _extract_json_ld(soup: BeautifulSoup) -> list[dict]:
-    """Parse all JSON-LD script tags. Skips malformed blocks silently."""
     objects = []
     for script in soup.find_all("script", type="application/ld+json"):
         try:
@@ -264,149 +260,82 @@ def _extract_json_ld(soup: BeautifulSoup) -> list[dict]:
 
 
 def _extract_open_graph(soup: BeautifulSoup) -> dict:
-    """Return a flat dict of og:* meta tag values."""
     og = {}
     for meta in soup.find_all("meta"):
         prop = meta.get("property", "") or meta.get("name", "")
         if prop.startswith("og:"):
-            key = prop[3:]
             content = meta.get("content", "").strip()
             if content:
-                og[key] = content
+                og[prop[3:]] = content
     return og
 
 
 # ---------------------------------------------------------------------------
-# Navigation and footer link extraction
+# Link extraction — lightly filtered, Claude decides what's useful
 # ---------------------------------------------------------------------------
 
-def _extract_nav_links(soup: BeautifulSoup, base_url: str) -> list[dict]:
+def _extract_all_internal_links(soup: BeautifulSoup, base_url: str) -> list[dict]:
     """
-    Extract main navigation links. Returns list of {"text": str, "url": str}.
-    Only same-domain links, deduped by URL.
+    Collect all unique internal links from the page.
+    Only filters out obviously useless URLs (cart, login, wp-admin, etc.).
+    Claude decides which links are product categories worth using as sitelinks.
     """
+    seen: set[str] = set()
     links = []
-    seen_urls = set()
 
-    nav_elements = soup.find_all("nav")
-    if not nav_elements:
-        nav_elements = soup.find_all("header")
-
-    for nav in nav_elements:
-        for a in nav.find_all("a", href=True):
-            href = a["href"]
-            text = a.get_text(strip=True)
-            if not text or len(text) > 60:
-                continue
-            abs_url = _absolute_url(href, base_url)
-            if not abs_url or not _same_domain(abs_url, base_url):
-                continue
-            if abs_url == base_url or abs_url == base_url + "/":
-                continue
-            if abs_url not in seen_urls:
-                seen_urls.add(abs_url)
-                links.append({"text": text, "url": abs_url})
-
-    return links
-
-
-def _extract_footer_links(soup: BeautifulSoup, base_url: str) -> list[dict]:
-    """Extract links from the footer for secondary page discovery."""
-    links = []
-    seen_urls = set()
-    footer = soup.find("footer")
-    if not footer:
-        return links
-    for a in footer.find_all("a", href=True):
-        text = a.get_text(strip=True)
+    for a in soup.find_all("a", href=True):
         abs_url = _absolute_url(a["href"], base_url)
         if not abs_url or not _same_domain(abs_url, base_url):
             continue
-        if abs_url not in seen_urls:
-            seen_urls.add(abs_url)
-            links.append({"text": text, "url": abs_url})
+        # Strip query strings and fragments for dedup
+        clean = abs_url.split("?")[0].split("#")[0].rstrip("/")
+        if not clean or clean == base_url.rstrip("/"):
+            continue
+        if clean in seen:
+            continue
+        if _ALWAYS_SKIP.search(clean):
+            continue
+        text = _link_display_text(a)
+        if not text:
+            continue
+        seen.add(clean)
+        links.append({"text": text, "url": abs_url.split("?")[0].split("#")[0]})
+
     return links
 
 
 # ---------------------------------------------------------------------------
-# Secondary page discovery
+# Fetch top pages for additional context
 # ---------------------------------------------------------------------------
 
-def _find_secondary_pages(links: list[dict], base_url: str) -> dict[str, str]:
+def _scrape_top_pages(
+    all_links: list[dict], session: requests.Session, max_pages: int = MAX_NAV_PAGES
+) -> list[dict]:
     """
-    Match link URLs against SECONDARY_PAGE_SLUGS.
-    Returns {slug_category: url}. First match per category wins.
+    Fetch the first max_pages unique internal links to give Claude page-level context.
+    Skips individual product pages (very long URL slugs are a reliable signal).
     """
-    found = {}
-    for link in links:
-        url = link.get("url", "")
-        path = urlparse(url).path.lower()
-        text = link.get("text", "").lower()
-        for slug in SECONDARY_PAGE_SLUGS:
-            if slug in found:
-                continue
-            if slug in path or slug in text:
-                found[slug] = url
-    return found
-
-
-# ---------------------------------------------------------------------------
-# Individual page scraping
-# ---------------------------------------------------------------------------
-
-def _scrape_page(url: str, session: requests.Session) -> dict | None:
-    """
-    Fetch and extract raw text from a single page.
-    Returns None if fetch fails or robots.txt disallows.
-    """
-    base_url = url.rsplit("/", 1)[0] if "/" in urlparse(url).path else url
-    if not _is_allowed_by_robots(base_url, url):
-        logger.warning("robots.txt disallows: %s", url)
-        return None
-
-    response = _fetch(url, session)
-    if response is None:
-        return None
-
-    soup = BeautifulSoup(response.text, "lxml")
-    parsed = urlparse(url)
-
-    return {
-        "url": url,
-        "url_path": parsed.path,
-        "title": _extract_title(soup),
-        "text": _extract_page_text(soup, max_chars=PAGE_TEXT_LIMIT),
-    }
-
-
-# ---------------------------------------------------------------------------
-# Batch scraping
-# ---------------------------------------------------------------------------
-
-def _scrape_nav_pages(nav_links: list[dict], session: requests.Session) -> list[dict]:
-    """Scrape up to MAX_NAV_PAGES navigation links."""
     pages = []
-    for link in nav_links[:MAX_NAV_PAGES]:
-        page = _scrape_page(link["url"], session)
-        if page is not None:
-            pages.append(page)
+    for link in all_links:
+        if len(pages) >= max_pages:
+            break
+        url = link["url"]
+        # Skip single-product pages: path has 2+ segments and last segment is long
+        path = urlparse(url).path.rstrip("/")
+        segments = [s for s in path.split("/") if s]
+        if len(segments) >= 2 and len(segments[-1]) > 40:
+            continue
+        resp = _fetch(url, session)
+        if resp is None:
+            continue
+        soup = BeautifulSoup(resp.text, "lxml")
+        pages.append({
+            "url": url,
+            "url_path": urlparse(url).path,
+            "title": _extract_title(soup),
+            "text": _extract_page_text(soup, max_chars=PAGE_TEXT_LIMIT),
+        })
     return pages
-
-
-def _scrape_secondary_pages(
-    secondary_map: dict[str, str],
-    session: requests.Session,
-) -> dict[str, dict | None]:
-    """
-    Scrape each secondary page URL.
-    Returns {slug_category: page_dict | None}.
-    """
-    result = {}
-    for slug, url in secondary_map.items():
-        result[slug] = _scrape_page(url, session)
-    for slug in SECONDARY_PAGE_SLUGS:
-        result.setdefault(slug, None)
-    return result
 
 
 # ---------------------------------------------------------------------------
@@ -420,4 +349,10 @@ if __name__ == "__main__":
 
     logging.basicConfig(level=logging.INFO)
     data = scrape_site(sys.argv[1])
-    print(json.dumps(data, indent=2, ensure_ascii=False))
+
+    sys.stdout.buffer.write(f"Language: {data['language']}\n".encode("utf-8"))
+    sys.stdout.buffer.write(f"Homepage: {data['homepage']['title']}\n".encode("utf-8"))
+    sys.stdout.buffer.write(f"All links found: {len(data['all_links'])}\n".encode("utf-8"))
+    sys.stdout.buffer.write(f"Pages fetched: {len(data['nav_pages'])}\n".encode("utf-8"))
+    for lnk in data["all_links"]:
+        sys.stdout.buffer.write(f"  {lnk['text'][:40]:<42} {lnk['url']}\n".encode("utf-8"))

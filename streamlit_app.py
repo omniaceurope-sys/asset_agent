@@ -268,119 +268,42 @@ def render_inputs() -> tuple[str, str, str]:
 
 
 # ---------------------------------------------------------------------------
-# Step 2 — Scrape
+# Step 2 — Analyze & Generate (Claude fetches the site and generates assets)
 # ---------------------------------------------------------------------------
 
-def render_scrape_button(url: str, account_id: str):
+def render_generate_button(url: str, account_id: str, account_name: str):
     if not url:
         st.info("Enter a website URL to get started.")
         return
     if not account_id:
-        st.info("Select a Google Ads account before scraping.")
-        return
-
-    if st.button("🔍 Scrape Website", type="primary"):
-        _run_scrape(url)
-
-
-def _run_scrape(url: str):
-    from scraper import scrape_site, ScraperError
-
-    with st.spinner(f"Scraping {url} ..."):
-        try:
-            data = scrape_site(url)
-        except ScraperError as e:
-            st.error(f"Scraping failed: {e}")
-            return
-        except Exception as e:
-            st.error(f"Unexpected error while scraping: {e}")
-            return
-
-    st.session_state["scraped_data"] = data
-    for key in ("sitelinks", "callouts", "snippets", "push_results"):
-        st.session_state.pop(key, None)
-    for k in list(st.session_state.keys()):
-        if k.startswith(("sl_", "co_", "sn_")):
-            del st.session_state[k]
-    st.rerun()
-
-
-def render_scrape_summary():
-    data = st.session_state.get("scraped_data")
-    if not data:
-        return
-
-    st.success("Website scraped successfully.")
-    st.markdown("### Scraped Data Summary")
-
-    nav_pages = data.get("nav_pages", [])
-    secondary = {k: v for k, v in data.get("secondary_pages", {}).items() if v}
-    homepage = data.get("homepage", {})
-
-    col1, col2, col3 = st.columns(3)
-    col1.metric("Language", data.get("language") or "—")
-    col2.metric("Nav pages scraped", len(nav_pages))
-    col3.metric("Secondary pages", len(secondary))
-
-    if homepage:
-        st.caption(f"Homepage: **{homepage.get('title') or data.get('base_url', '')}**")
-
-    if nav_pages:
-        with st.expander(f"Navigation pages ({len(nav_pages)})"):
-            for p in nav_pages:
-                st.markdown(
-                    f"- **{p.get('title') or p.get('url_path', '')}** "
-                    f"— `{p.get('url_path', '')}`"
-                )
-
-    if secondary:
-        with st.expander(f"Secondary pages found ({len(secondary)})"):
-            for slug, page in secondary.items():
-                st.markdown(f"- **{slug}**: [{page.get('url_path', '')}]({page.get('url', '')})")
-
-    if data.get("scrape_errors"):
-        with st.expander("⚠️ Scrape warnings"):
-            for err in data["scrape_errors"]:
-                st.warning(err)
-
-
-# ---------------------------------------------------------------------------
-# Step 3 — Generate with Claude
-# ---------------------------------------------------------------------------
-
-def render_generate_button(account_id: str, account_name: str):
-    if "scraped_data" not in st.session_state:
+        st.info("Select a Google Ads account to continue.")
         return
 
     anthropic_key = _get_anthropic_key()
     if not anthropic_key:
-        st.error(
-            "Anthropic API key not configured. "
-            "Add `ANTHROPIC_API_KEY` to your secrets."
-        )
+        st.error("Anthropic API key not configured. Add `ANTHROPIC_API_KEY` to your secrets.")
         return
 
-    st.markdown("## 2. Generate Assets with Claude")
-    st.caption(f"Generating for: **{account_name}** (`{account_id}`)")
+    st.markdown("## 2. Analyze & Generate Assets")
+    st.caption(f"Claude will fetch **{url}** and generate assets for **{account_name}**.")
 
-    if st.button("✨ Generate Assets", type="primary"):
-        _run_generate(anthropic_key, account_name)
+    if st.button("✨ Analyze & Generate", type="primary"):
+        _run_generate(url, anthropic_key, account_name)
 
 
-def _run_generate(anthropic_key: str, account_name: str):
+def _run_generate(url: str, anthropic_key: str, account_name: str):
     from google_ads_assets import generate_assets_with_claude, validate_assets
 
     os.environ["ANTHROPIC_API_KEY"] = anthropic_key
-    data = st.session_state["scraped_data"]
 
-    with st.spinner("Generating ad assets with Claude ... (this takes ~15 seconds)"):
+    with st.spinner("Claude is fetching and analyzing the website... (30–60 seconds)"):
         try:
-            raw = generate_assets_with_claude(data, account_name)
+            raw = generate_assets_with_claude(url, account_name)
         except SystemExit as e:
-            st.error(f"Claude generation failed: {e}")
+            st.error(f"Generation failed: {e}")
             return
         except Exception as e:
-            st.error(f"Unexpected error during generation: {e}")
+            st.error(f"Unexpected error: {e}")
             return
 
     assets, warnings = validate_assets(raw)
@@ -394,6 +317,9 @@ def _run_generate(anthropic_key: str, account_name: str):
     st.session_state["callouts"] = assets.get("callouts", [])
     st.session_state["snippets"] = assets.get("structured_snippets", [])
     st.session_state.pop("push_results", None)
+    for k in list(st.session_state.keys()):
+        if k.startswith(("sl_", "co_", "sn_")):
+            del st.session_state[k]
     st.rerun()
 
 
@@ -807,20 +733,15 @@ def main():
 
     st.title("🎯 Google Ads Asset Builder")
     st.caption(
-        "Scrape a website, generate sitelinks / callouts / structured snippets with Claude, "
-        "and push them directly to a Google Ads account."
+        "Enter a website URL, let Claude analyze it and generate "
+        "sitelinks / callouts / structured snippets, then push directly to Google Ads."
     )
     st.divider()
 
     url, account_id, account_name = render_inputs()
 
     st.divider()
-    render_scrape_button(url, account_id)
-    render_scrape_summary()
-
-    if st.session_state.get("scraped_data"):
-        st.divider()
-        render_generate_button(account_id, account_name)
+    render_generate_button(url, account_id, account_name)
 
     if st.session_state.get("sitelinks") is not None:
         st.divider()

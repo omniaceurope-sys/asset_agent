@@ -26,7 +26,6 @@ import google_ads_assets as gaa
 from google_ads_assets import (
     CHAR_LIMITS,
     _trim_to_limit,
-    build_user_prompt,
     load_accounts_config,
     load_google_ads_config,
     normalize_account_id,
@@ -274,107 +273,6 @@ class TestValidateAssets:
 
 
 # ===========================================================================
-# build_user_prompt
-# ===========================================================================
-
-class TestBuildUserPrompt:
-    # Scraped data now contains raw page text (no pre-extracted fields)
-    SCRAPED = {
-        "base_url": "https://example.com",
-        "language": "en-GB",
-        "homepage": {
-            "url": "https://example.com",
-            "url_path": "/",
-            "title": "TestBrand | Home",
-            "text": "Free shipping on orders over £50. 30-day returns. Quality since 2015.",
-        },
-        "nav_pages": [
-            {
-                "url": "https://example.com/shop",
-                "url_path": "/shop",
-                "title": "Shop",
-                "text": "Browse all our products. Find what you need.",
-            }
-        ],
-        "secondary_pages": {
-            "about": {
-                "url": "https://example.com/about",
-                "url_path": "/about",
-                "title": "About Us",
-                "text": "We have been making quality products since 2015.",
-            }
-        },
-        "json_ld": [{"@type": "Organization", "name": "TestBrand"}],
-        "open_graph": {"site_name": "TestBrand"},
-    }
-
-    def test_includes_base_url(self):
-        prompt = build_user_prompt(self.SCRAPED, "TestBrand - UK")
-        assert "https://example.com" in prompt
-
-    def test_includes_language(self):
-        prompt = build_user_prompt(self.SCRAPED, "TestBrand - UK")
-        assert "en-GB" in prompt
-
-    def test_includes_homepage_text(self):
-        prompt = build_user_prompt(self.SCRAPED, "TestBrand - UK")
-        assert "Free shipping on orders over" in prompt
-
-    def test_includes_nav_page_text(self):
-        prompt = build_user_prompt(self.SCRAPED, "TestBrand - UK")
-        assert "/shop" in prompt
-        assert "Browse all our products" in prompt
-
-    def test_includes_secondary_page_text(self):
-        prompt = build_user_prompt(self.SCRAPED, "TestBrand - UK")
-        assert "About Us" in prompt
-        assert "quality products since 2015" in prompt
-
-    def test_includes_account_name(self):
-        prompt = build_user_prompt(self.SCRAPED, "Brand A - UK")
-        assert "Brand A - UK" in prompt
-
-    def test_includes_json_ld_summary(self):
-        prompt = build_user_prompt(self.SCRAPED, "TestBrand - UK")
-        assert "Organization" in prompt
-
-    def test_includes_page_text_directly(self):
-        scraped = dict(self.SCRAPED)
-        scraped["nav_pages"] = [
-            {
-                "url": "https://example.com/long",
-                "url_path": "/long",
-                "title": "Long Page",
-                "text": "X" * 500,
-            }
-        ]
-        prompt = build_user_prompt(scraped, "Account")
-        # Page text is included verbatim (truncation happens in scraper, not here)
-        assert "X" * 100 in prompt
-
-    def test_handles_missing_homepage_gracefully(self):
-        scraped = {
-            "base_url": "https://example.com",
-            "language": None,
-            "homepage": None,
-            "nav_pages": [],
-            "secondary_pages": {},
-            "json_ld": [],
-            "open_graph": {},
-        }
-        prompt = build_user_prompt(scraped, "Account")
-        assert "https://example.com" in prompt
-        assert "no page content scraped" in prompt
-
-    def test_handles_empty_nav_pages(self):
-        scraped = dict(self.SCRAPED)
-        scraped["nav_pages"] = []
-        prompt = build_user_prompt(scraped, "Account")
-        # Should still work and include homepage
-        assert "https://example.com" in prompt
-
-
-# ===========================================================================
 # load_google_ads_config
 # ===========================================================================
 
@@ -487,29 +385,27 @@ VALID_CLAUDE_RESPONSE = {
     ],
 }
 
-SCRAPED_DATA_STUB = {
-    "base_url": "https://example.com",
-    "brand_name": "TestBrand",
-    "language": "en-GB",
-    "currency": "GBP",
-    "tagline": "Quality since 2015",
-    "trust_signals": [],
-    "nav_pages": [],
-    "secondary_pages": {},
-    "json_ld": [],
-    "open_graph": {},
-}
+
+def _make_end_turn_response(text: str) -> MagicMock:
+    """Build a mock Claude response that stops with end_turn and a text block."""
+    mock_response = MagicMock()
+    mock_response.stop_reason = "end_turn"
+    text_block = MagicMock()
+    text_block.type = "text"
+    text_block.text = text
+    mock_response.content = [text_block]
+    return mock_response
 
 
 class TestGenerateAssetsWithClaude:
     @patch("google_ads_assets.anthropic.Anthropic")
     def test_returns_parsed_assets_on_success(self, MockAnthropic):
         mock_client = MockAnthropic.return_value
-        mock_response = MagicMock()
-        mock_response.content = [MagicMock(text=json.dumps(VALID_CLAUDE_RESPONSE))]
-        mock_client.messages.create.return_value = mock_response
+        mock_client.messages.create.return_value = _make_end_turn_response(
+            json.dumps(VALID_CLAUDE_RESPONSE)
+        )
 
-        result = gaa.generate_assets_with_claude(SCRAPED_DATA_STUB, "TestBrand - UK")
+        result = gaa.generate_assets_with_claude("https://example.com", "TestBrand - UK")
         assert "sitelinks" in result
         assert "callouts" in result
         assert "structured_snippets" in result
@@ -518,35 +414,32 @@ class TestGenerateAssetsWithClaude:
     @patch("google_ads_assets.anthropic.Anthropic")
     def test_strips_markdown_fences(self, MockAnthropic):
         mock_client = MockAnthropic.return_value
-        mock_response = MagicMock()
         fenced = f"```json\n{json.dumps(VALID_CLAUDE_RESPONSE)}\n```"
-        mock_response.content = [MagicMock(text=fenced)]
-        mock_client.messages.create.return_value = mock_response
+        mock_client.messages.create.return_value = _make_end_turn_response(fenced)
 
-        result = gaa.generate_assets_with_claude(SCRAPED_DATA_STUB, "TestBrand - UK")
+        result = gaa.generate_assets_with_claude("https://example.com", "TestBrand - UK")
         assert "sitelinks" in result
 
     @patch("google_ads_assets.anthropic.Anthropic")
     def test_exits_on_invalid_json_after_retries(self, MockAnthropic):
         mock_client = MockAnthropic.return_value
-        mock_response = MagicMock()
-        mock_response.content = [MagicMock(text="THIS IS NOT JSON AT ALL")]
-        mock_client.messages.create.return_value = mock_response
+        mock_client.messages.create.return_value = _make_end_turn_response(
+            "THIS IS NOT JSON AT ALL"
+        )
 
         with pytest.raises(SystemExit):
-            gaa.generate_assets_with_claude(SCRAPED_DATA_STUB, "TestBrand")
+            gaa.generate_assets_with_claude("https://example.com", "TestBrand")
 
     @patch("google_ads_assets.anthropic.Anthropic")
     def test_ensures_all_keys_present(self, MockAnthropic):
         """If Claude omits a key, validate_assets still gets a valid structure."""
         mock_client = MockAnthropic.return_value
-        mock_response = MagicMock()
-        # Response missing 'callouts'
         partial = {"sitelinks": [], "structured_snippets": []}
-        mock_response.content = [MagicMock(text=json.dumps(partial))]
-        mock_client.messages.create.return_value = mock_response
+        mock_client.messages.create.return_value = _make_end_turn_response(
+            json.dumps(partial)
+        )
 
-        result = gaa.generate_assets_with_claude(SCRAPED_DATA_STUB, "TestBrand")
+        result = gaa.generate_assets_with_claude("https://example.com", "TestBrand")
         assert "callouts" in result  # filled in as []
 
 

@@ -67,8 +67,35 @@ SNIPPET_HEADERS_EN = [
 # ---------------------------------------------------------------------------
 
 SYSTEM_PROMPT = """\
-You are a Google Ads copywriter specializing in ad asset creation.
-You generate sitelinks, callouts, and structured snippets for Google Ads accounts.
+You are a Google Ads asset specialist. Given a website URL and account name,
+you fetch the site, identify its product/service category structure, and generate
+Google Ads sitelinks, callouts, and structured snippets.
+
+STEP 1 — FETCH AND ANALYZE
+Use the fetch_url tool to fetch the homepage. Read the page content and ALL links.
+Identify CATEGORY pages — pages that list multiple products or services under a theme.
+Category pages typically have URL patterns like:
+  /product-category/..., /category/..., /collections/..., /shop/..., /kategorija/...,
+  /kategorie/..., /categorie/..., or any path that groups products by type.
+
+For sitelinks, ONLY use category pages. NEVER use individual product pages.
+Individual product pages have URL patterns like:
+  /product/..., /izdelek/..., /produkt/..., /produit/..., /item/..., /p/...,
+  or any path that leads to a single specific product.
+
+If you cannot tell from the URL, use fetch_url on the page — a category page shows
+a grid or list of multiple products; a product page shows one product with price/add-to-cart.
+
+Also exclude from sitelinks:
+  - About us, Contact, FAQ, Blog, News, Press, Careers, Team
+  - Delivery, Shipping, Returns, Privacy policy, Terms, Cookie policy
+  - Login, Account, Wishlist, Cart
+  - Promotional or seasonal campaign landing pages
+
+Use fetch_url on 2–4 category pages to understand what each category contains.
+
+STEP 2 — GENERATE ASSETS
+Using ONLY URLs found on the site, generate the assets below.
 
 HARD CHARACTER LIMITS — count every character including spaces. NEVER exceed:
   - Sitelink title:       25 characters
@@ -76,37 +103,23 @@ HARD CHARACTER LIMITS — count every character including spaces. NEVER exceed:
   - Callout text:         25 characters
   - Snippet value:        25 characters
 
-STRUCTURED SNIPPET HEADERS — use ONLY from this exact list (copy spelling exactly):
+STRUCTURED SNIPPET HEADERS — use ONLY from this exact list:
   Amenities, Brands, Courses, Degree programs, Destinations, Featured hotels,
   Insurance coverage, Models, Neighborhoods, Service catalog, Shows, Styles, Types
 
 WRITING RULES:
-1. Before finalizing any text, count every character. If it exceeds the limit, shorten it.
-2. Write ALL text in the same language as the website (do NOT translate to English).
-3. Only include claims that are directly supported by the scraped data provided.
-   Never add "Award-Winning", "Best in Class", "Clinically Proven", "#1", etc.
-   unless the scraped data explicitly states it.
+1. Count every character before finalizing. Shorten if needed.
+2. Write ALL text in the same language as the website.
+3. Only include claims supported by the actual page content.
 4. No exclamation marks in sitelink titles or callouts.
-   Maximum one exclamation mark allowed in sitelink descriptions.
 5. Title Case for sitelink titles and callout texts.
-6. Each callout must communicate a different benefit — no redundancy.
-7. Do NOT create sitelinks for: the homepage, blog posts, privacy policy,
-   terms of service, cookie policy, login, account pages, contact pages,
-   support pages, FAQ pages, customer service pages, or any non-product destination.
-   ALL sitelinks must link to product pages, category pages, or collection pages only.
-8. ALL sitelink descriptions must be strictly product-focused: describe what the
-   product is, its key features, materials, or why a shopper would want it.
-   Do NOT write descriptions about shipping, returns, company values, contact info,
-   customer service, guarantees, or any non-product topic.
-9. Only use structured snippet headers that genuinely fit the business.
-   Do not force a header that does not apply.
-10. Provide 3–10 values per structured snippet.
-11. Provide 8–12 sitelinks, 8–12 callouts, and 3–5 structured snippets.
+6. Each callout must communicate a different benefit.
+7. ALL sitelinks must link to category pages only — never to individual products.
+8. Sitelink descriptions must describe the product/category — not policies or company info.
+9. Provide 8–12 sitelinks, 8–12 callouts, and 3–5 structured snippets.
 
 OUTPUT FORMAT:
-Respond ONLY with valid JSON. No markdown fences, no explanation, no preamble.
-Exact schema:
-
+When done, respond ONLY with valid JSON. No markdown, no explanation.
 {
   "sitelinks": [
     {
@@ -116,17 +129,34 @@ Exact schema:
       "final_url": "https://..."
     }
   ],
-  "callouts": [
-    "string <= 25 chars"
-  ],
+  "callouts": ["string <= 25 chars"],
   "structured_snippets": [
     {
       "header": "one of the approved headers",
-      "values": ["string <= 25 chars", "..."]
+      "values": ["string <= 25 chars"]
     }
   ]
 }
 """
+
+# Tool definition for Claude to fetch URLs
+FETCH_URL_TOOL = {
+    "name": "fetch_url",
+    "description": (
+        "Fetch the text content of a URL. Returns cleaned page text and all links "
+        "found on the page as 'text → url' pairs. Use this to read website pages."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "url": {
+                "type": "string",
+                "description": "The full URL to fetch (must start with http:// or https://)",
+            }
+        },
+        "required": ["url"],
+    },
+}
 
 
 # ---------------------------------------------------------------------------
@@ -186,182 +216,133 @@ def normalize_account_id(raw_id: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Scraper wrapper
+# fetch_url tool — executed by Python when Claude calls it
 # ---------------------------------------------------------------------------
 
-def run_scraper(url: str) -> dict:
+def _execute_fetch_url(url: str) -> str:
     """
-    Run the scraper and print a progress summary.
-    Re-raises ScraperError on unrecoverable failure.
+    Fetch a URL and return cleaned text + link list for Claude.
+    This is called whenever Claude uses the fetch_url tool.
     """
-    sys.path.insert(0, str(Path(__file__).parent))
-    from scraper import scrape_site, ScraperError  # noqa: PLC0415
+    import copy as _copy
+    import requests as _requests
+    from bs4 import BeautifulSoup as _BS
+    from urllib.parse import urljoin as _urljoin, urlparse as _urlparse
 
-    print(f"\nScraping {url}...")
-
+    headers = {
+        "User-Agent": "Mozilla/5.0 (compatible; AssetBuilderBot/1.0)",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Accept": "text/html,application/xhtml+xml,*/*;q=0.8",
+    }
     try:
-        data = scrape_site(url)
-    except ScraperError as e:
-        sys.exit(f"ERROR: Scraper failed — {e}")
+        resp = _requests.get(url, headers=headers, timeout=15, allow_redirects=True)
+        resp.raise_for_status()
+    except Exception as e:
+        return f"ERROR fetching {url}: {e}"
 
-    lang = data.get("language") or "unknown"
-    nav_count = len(data.get("nav_pages", []))
-    secondary_found = [k for k, v in data.get("secondary_pages", {}).items() if v is not None]
+    soup = _BS(resp.text, "lxml")
 
-    print(f"  Language:      {lang}")
-    print(f"  Nav pages:     {nav_count}")
-    if secondary_found:
-        print(f"  Secondary pages found: {', '.join(secondary_found)}")
-    if data.get("scrape_errors"):
-        for err in data["scrape_errors"]:
-            print(f"  WARNING: {err}", file=sys.stderr)
+    # Clean body text
+    soup_copy = _copy.copy(soup)
+    for tag in soup_copy(["nav", "header", "footer", "script", "style",
+                           "aside", "noscript", "svg", "iframe"]):
+        tag.decompose()
+    text = re.sub(r"\s+", " ", soup_copy.get_text(" ", strip=True)).strip()[:5000]
 
-    return data
+    # All internal links
+    base = f"{_urlparse(url).scheme}://{_urlparse(url).netloc}"
+    seen: set[str] = set()
+    link_lines = []
+    for a in soup.find_all("a", href=True):
+        abs_url = _urljoin(url, a["href"]).split("?")[0].split("#")[0].rstrip("/")
+        if abs_url in seen or base not in abs_url:
+            continue
+        seen.add(abs_url)
+        link_text = a.get_text(strip=True) or (a.find("img") or {}).get("alt", "") or ""
+        if link_text:
+            link_lines.append(f"  {link_text[:60]} → {abs_url}")
+
+    links_block = "\n".join(link_lines[:80]) or "  (no internal links found)"
+    return f"PAGE TEXT:\n{text}\n\nINTERNAL LINKS:\n{links_block}"
 
 
 # ---------------------------------------------------------------------------
-# Claude prompt builder
+# Claude asset generation (agentic — Claude fetches the site itself)
 # ---------------------------------------------------------------------------
 
-def build_user_prompt(scraped_data: dict, account_name: str) -> str:
+def generate_assets_with_claude(url: str, account_name: str) -> dict:
     """
-    Format raw scraped page text into the Claude user message.
-    Claude receives full page text and figures out brand, products,
-    selling points, and trust signals itself.
-    """
-    base_url = scraped_data.get("base_url", "")
-    language = scraped_data.get("language") or "unknown"
-
-    # Build page text blocks
-    page_blocks = []
-
-    homepage = scraped_data.get("homepage")
-    if homepage:
-        title = homepage.get("title") or base_url
-        text = homepage.get("text", "").strip()
-        page_blocks.append(f"HOMEPAGE — {title}\nURL: {base_url}\n{text}")
-
-    for page in scraped_data.get("nav_pages", []):
-        title = page.get("title") or page.get("url_path", "")
-        text = page.get("text", "").strip()
-        page_blocks.append(
-            f"PAGE [{page.get('url_path', '')}] {title}\n{text}"
-        )
-
-    for slug, page in scraped_data.get("secondary_pages", {}).items():
-        if page:
-            title = page.get("title") or slug
-            text = page.get("text", "").strip()
-            page_blocks.append(
-                f"PAGE [{page.get('url_path', '')}] {title}\n{text}"
-            )
-
-    pages_block = "\n\n---\n\n".join(page_blocks) or "(no page content scraped)"
-
-    # JSON-LD summary (structured data, often contains product/org info)
-    ld_lines = []
-    for obj in scraped_data.get("json_ld", [])[:5]:
-        graph = obj.get("@graph", [obj])
-        for item in graph:
-            ld_type = item.get("@type", "")
-            name = item.get("name", "")
-            desc = item.get("description", "")
-            if ld_type or name:
-                ld_lines.append(f"  type={ld_type} name={name} desc={desc[:100]}")
-    ld_block = "\n".join(ld_lines) or "  (none)"
-
-    return f"""Account: {account_name}
-Website: {base_url}
-Detected language: {language}
-
---- PAGE CONTENT ---
-
-{pages_block}
-
---- STRUCTURED DATA (JSON-LD) ---
-
-{ld_block}
-
---- END SCRAPED DATA ---
-
-From the page content above, identify: the brand name, product/category structure,
-key selling points, and any trust signals (ratings, guarantees, certifications).
-Then generate:
-  - 8 to 12 sitelinks (product and category pages only)
-  - 8 to 12 callouts
-  - 3 to 5 structured snippets
-
-Use ONLY structured snippet headers that genuinely match this business.
-Write ALL text in: {language}.
-Output ONLY valid JSON — no markdown, no explanation.
-"""
-
-
-# ---------------------------------------------------------------------------
-# Claude asset generation
-# ---------------------------------------------------------------------------
-
-def generate_assets_with_claude(scraped_data: dict, account_name: str) -> dict:
-    """
-    Call the Anthropic API with prompt caching to generate ad assets.
+    Give Claude the URL and let it fetch and analyze the site using the
+    fetch_url tool, then generate ad assets.
     Returns {"sitelinks": [...], "callouts": [...], "structured_snippets": [...]}.
     """
-    client = anthropic.Anthropic()  # reads ANTHROPIC_API_KEY from env
-    user_prompt = build_user_prompt(scraped_data, account_name)
+    client = anthropic.Anthropic()
 
-    print("\nGenerating assets with Claude...")
+    messages = [
+        {
+            "role": "user",
+            "content": (
+                f"Account: {account_name}\n"
+                f"Website: {url}\n\n"
+                "Fetch this website, identify its product/category structure, "
+                "and generate the Google Ads assets."
+            ),
+        }
+    ]
 
-    for attempt in range(1, 3):  # retry once on failure
-        try:
-            response = client.messages.create(
-                model="claude-sonnet-4-6",
-                max_tokens=4096,
-                system=[
-                    {
-                        "type": "text",
-                        "text": SYSTEM_PROMPT,
-                        "cache_control": {"type": "ephemeral"},
-                    }
-                ],
-                messages=[
-                    {
-                        "role": "user",
-                        "content": [
-                            {
-                                "type": "text",
-                                "text": user_prompt,
-                                "cache_control": {"type": "ephemeral"},
-                            }
-                        ],
-                    }
-                ],
-            )
-            break
-        except anthropic.APIError as e:
-            if attempt == 2:
-                sys.exit(f"ERROR: Claude API failed after 2 attempts — {e}")
-            print(f"  Claude API error (attempt {attempt}): {e}. Retrying...", file=sys.stderr)
+    MAX_TOOL_ROUNDS = 8
+    for round_num in range(MAX_TOOL_ROUNDS):
+        response = client.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=4096,
+            system=[{"type": "text", "text": SYSTEM_PROMPT,
+                      "cache_control": {"type": "ephemeral"}}],
+            tools=[FETCH_URL_TOOL],
+            messages=messages,
+        )
 
-    raw = response.content[0].text.strip()
+        # Claude is done — extract JSON from the final text block
+        if response.stop_reason == "end_turn":
+            for block in response.content:
+                if block.type == "text":
+                    raw = block.text.strip()
+                    # Try fenced code block anywhere in the text
+                    fence_match = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", raw)
+                    if fence_match:
+                        raw = fence_match.group(1).strip()
+                    else:
+                        # Fall back to first top-level JSON object in the text
+                        obj_match = re.search(r"\{[\s\S]*\}", raw)
+                        if obj_match:
+                            raw = obj_match.group(0)
+                    try:
+                        assets = json.loads(raw)
+                        for key in ("sitelinks", "callouts", "structured_snippets"):
+                            assets.setdefault(key, [])
+                        return assets
+                    except json.JSONDecodeError:
+                        continue
+            sys.exit("ERROR: Claude finished without returning valid JSON assets.")
 
-    # Strip accidental markdown fences
-    raw = re.sub(r"^```(?:json)?\s*", "", raw)
-    raw = re.sub(r"\s*```$", "", raw)
-    raw = raw.strip()
+        # Claude called fetch_url — execute it and return results
+        if response.stop_reason == "tool_use":
+            messages.append({"role": "assistant", "content": response.content})
+            tool_results = []
+            for block in response.content:
+                if block.type == "tool_use" and block.name == "fetch_url":
+                    fetch_url = block.input.get("url", "")
+                    result = _execute_fetch_url(fetch_url)
+                    tool_results.append({
+                        "type": "tool_result",
+                        "tool_use_id": block.id,
+                        "content": result,
+                    })
+            messages.append({"role": "user", "content": tool_results})
+            continue
 
-    try:
-        assets = json.loads(raw)
-    except json.JSONDecodeError as e:
-        print("ERROR: Claude returned non-JSON response:", file=sys.stderr)
-        print(raw[:500], file=sys.stderr)
-        sys.exit(f"JSON parse error: {e}")
+        break  # unexpected stop reason
 
-    # Basic structure validation
-    for key in ("sitelinks", "callouts", "structured_snippets"):
-        if key not in assets:
-            assets[key] = []
-
-    return assets
+    sys.exit("ERROR: Claude did not finish within the allowed tool call rounds.")
 
 
 # ---------------------------------------------------------------------------
