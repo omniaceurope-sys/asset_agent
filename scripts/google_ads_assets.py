@@ -866,11 +866,8 @@ def main() -> None:
     if not url:
         url = input("Enter website URL: ").strip()
 
-    # --- Scrape ---
-    scraped_data = run_scraper(url)
-
-    # --- Generate assets with Claude ---
-    raw_assets = generate_assets_with_claude(scraped_data, account_name)
+    # --- Generate assets with Claude (Claude fetches the site via fetch_url tool) ---
+    raw_assets = generate_assets_with_claude(url, account_name)
 
     # --- Validate character limits ---
     assets, warnings = validate_assets(raw_assets)
